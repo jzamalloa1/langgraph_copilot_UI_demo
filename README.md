@@ -149,6 +149,125 @@ Skills use a two-level disclosure pattern:
 
 This keeps the agent's context window small while maintaining full functionality.
 
+## Skill Tool Architecture: Two-File Pattern
+
+Each skill that generates output (like plots) uses a **two-file pattern**: a LangChain Tool (orchestrator) and an External Script (executor).
+
+### Why Two Files?
+
+| File | Role | Runs In | Context Impact |
+|------|------|---------|----------------|
+| `skill_tools.py::plot_historical_data()` | **LangChain Tool** - orchestrates workflow, validates inputs, manages metadata | LangGraph sandbox | Only docstring visible to LLM |
+| `scripts/plot_historical_data.py` | **External Script** - does actual work (matplotlib plotting) | Host machine (via subprocess) | NEVER loaded into context |
+
+### Detailed Flow: `plot_historical_data`
+
+```
+User: "Plot AAPL stock price"
+           │
+           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  AGENT (agent.py)                                                │
+│  Tools: [tavily_search, load_skill, plot_historical_data]       │
+│                                                                  │
+│  1. tavily_search("AAPL stock price") → gets dates/values       │
+│  2. load_skill("historical-plotter") → gets formatting guide    │
+│  3. plot_historical_data(dates, values, title, ylabel)          │
+│           │                                                      │
+└───────────┼──────────────────────────────────────────────────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  skill_tools.py :: plot_historical_data() [LangChain Tool]      │
+│                                                                  │
+│  • Validates inputs (dates/values not empty, lengths match)     │
+│  • Generates unique image_id: "plot_abc123"                     │
+│  • Creates output path: /tmp/plots/plot_abc123.png              │
+│  • Builds config JSON with dates, values, title, output_file    │
+│  • Calls subprocess.run():                                       │
+│           │                                                      │
+│    subprocess.run([                                              │
+│      "python3",                                                  │
+│      "utils/scripts/plot_historical_data.py",  ◄── SCRIPT       │
+│      '{"dates": [...], "values": [...], ...}'                   │
+│    ])                                                            │
+│           │                                                      │
+└───────────┼──────────────────────────────────────────────────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  scripts/plot_historical_data.py [External Script]              │
+│                                                                  │
+│  • Parses JSON config from sys.argv[1]                          │
+│  • Parses date strings into datetime objects                    │
+│  • Creates matplotlib figure (12x6, line plot with markers)     │
+│  • Formats axes, grid, title                                    │
+│  • Saves PNG to /tmp/plots/plot_abc123.png                      │
+│  • Prints: "Plot saved to: /tmp/plots/plot_abc123.png"          │
+│           │                                                      │
+└───────────┼──────────────────────────────────────────────────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  skill_tools.py :: plot_historical_data() [Continues]           │
+│                                                                  │
+│  • Verifies file was created at /tmp/plots/plot_abc123.png     │
+│  • Stores metadata in _session_images dict                      │
+│  • Returns: {                                                    │
+│      "type": "image",                                           │
+│      "status": "success",                                       │
+│      "image_id": "plot_abc123",                                 │
+│      "title": "AAPL Stock Price",                               │
+│      "data_points": 10                                          │
+│    }                                                             │
+└─────────────────────────────────────────────────────────────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Frontend (useRenderToolCall or /api/images/[filename])         │
+│                                                                  │
+│  • Receives image_id from tool result                           │
+│  • Renders: <img src="/api/images/plot_abc123" />               │
+│  • API route reads /tmp/plots/plot_abc123.png and serves it    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Design Benefits
+
+1. **Context Efficiency**: The matplotlib script (~100 lines) is NEVER loaded into the agent's context. Only the tool's docstring is visible to the LLM.
+
+2. **Sandbox Escape**: The subprocess breaks out of LangGraph's isolated sandbox to the host filesystem, where `/tmp/plots/` is accessible by the frontend.
+
+3. **Separation of Concerns**: The tool handles orchestration (validation, ID generation, metadata storage) while the script handles the actual work (matplotlib, date parsing, formatting).
+
+4. **Reusability**: The same script can be called with different parameters, or even from other tools, without duplicating visualization logic.
+
+### Creating New Skills
+
+When creating a new skill that generates output:
+
+1. **Create the LangChain Tool** in `skill_tools.py`:
+   - Validate inputs
+   - Generate unique output ID
+   - Build config JSON
+   - Call external script via `subprocess.run()`
+   - Store metadata and return result
+
+2. **Create the External Script** in `utils/scripts/`:
+   - Accept JSON config via `sys.argv[1]`
+   - Do the actual work (plotting, file generation, etc.)
+   - Save output to `/tmp/` directory
+   - Print confirmation message
+
+3. **Register the tool** in `agent.py`:
+   - Import from `skill_tools.py`
+   - Add to the `tools` list
+   - Add `ToolCallLimitMiddleware` if needed
+
+4. **Add skill documentation** to `utils/skills.md`:
+   - YAML frontmatter with name and description
+   - Full instructions for the agent
+
 ## Running the System
 
 ### Backend (LangGraph)
