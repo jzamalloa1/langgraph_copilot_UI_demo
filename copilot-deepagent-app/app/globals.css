@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0f172a;
+  --foreground: #e2e8f0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* CopilotKit dark theme overrides */
+.copilotKitChat,
+[class*="copilotKit"] {
+  --copilot-kit-background-color: transparent !important;
+  --copilot-kit-primary-color: #8b5cf6 !important;
+  --copilot-kit-contrast-color: #e2e8f0 !important;
+  --copilot-kit-secondary-color: #1e293b !important;
+  --copilot-kit-response-button-background-color: #334155 !important;
+  --copilot-kit-response-button-color: #e2e8f0 !important;
+  background: transparent !important;
+}
+
+/* Force dark backgrounds on CopilotKit components */
+[class*="copilotKit"] [class*="Messages"],
+[class*="copilotKit"] [class*="messages"] {
+  background: transparent !important;
+}
+
+[class*="copilotKit"] [class*="Input"],
+[class*="copilotKit"] [class*="input"],
+[class*="copilotKit"] textarea,
+[class*="copilotKit"] input {
+  background: #1e293b !important;
+  border-color: #475569 !important;
+  color: #ffffff !important;
+}
+
+[class*="copilotKit"] textarea::placeholder,
+[class*="copilotKit"] input::placeholder {
+  color: #94a3b8 !important;
+}
+
+[class*="copilotKit"] [class*="Message"],
+[class*="copilotKit"] [class*="message"] {
+  background: #1e293b !important;
+  color: #e2e8f0 !important;
+}
+
+[class*="copilotKit"] button {
+  background: #334155 !important;
+  color: #e2e8f0 !important;
+  border-color: #475569 !important;
+}
+
+[class*="copilotKit"] button:hover {
+  background: #475569 !important;
+}
+
+/* CopilotKit chat layout - make it fill the container */
+.copilotKitChat {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+}
+
+/* Messages area - scrollable, takes remaining space */
+.copilotKitMessages {
+  flex: 1 1 0% !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  scrollbar-width: thin;
+  scrollbar-color: #475569 transparent;
+}
+
+.copilotKitMessages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.copilotKitMessages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.copilotKitMessages::-webkit-scrollbar-thumb {
+  background-color: #475569;
+  border-radius: 3px;
+}
+
+/* Input area - fixed height at bottom */
+.copilotKitInput {
+  flex: 0 0 auto !important;
+}
