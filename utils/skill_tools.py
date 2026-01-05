@@ -178,3 +178,104 @@ def list_stored_images() -> dict:
         "count": len(image_list),
         "images": image_list
     }
+
+
+@tool(parse_docstring=True)
+def plot_distribution_comparison(
+    groups: list[dict],
+    plot_type: str = "kde",
+    title: str = "Distribution Comparison",
+    xlabel: str = "Value",
+    ylabel: str = "",
+) -> dict:
+    """Compare distributions of one or more data groups. Load skill 'distribution-comparison' for usage details.
+
+    Args:
+        groups: List of groups to compare. Each group is a dict with 'name' (str) and 'values' (list of floats).
+        plot_type: Type of plot - 'histogram', 'kde', 'ecdf', 'violin', 'box', 'strip', 'swarm', or 'ridge'.
+        title: Plot title
+        xlabel: X-axis label (or value label for violin/box/strip/swarm)
+        ylabel: Y-axis label (auto-generated if empty)
+
+    Returns:
+        Dictionary with image_id for retrieval and display
+    """
+    # Validate inputs
+    if not groups:
+        return {"type": "error", "message": "groups cannot be empty"}
+
+    for i, group in enumerate(groups):
+        if "name" not in group or "values" not in group:
+            return {"type": "error", "message": f"Group {i} must have 'name' and 'values' keys"}
+        if not group["values"]:
+            return {"type": "error", "message": f"Group '{group['name']}' has empty values"}
+
+    valid_plot_types = ["histogram", "kde", "ecdf", "violin", "box", "strip", "swarm", "ridge"]
+    if plot_type not in valid_plot_types:
+        return {"type": "error", "message": f"Invalid plot_type '{plot_type}'. Must be one of: {valid_plot_types}"}
+
+    # Generate unique image ID
+    image_id = f"dist_{uuid.uuid4().hex[:8]}"
+    filename = f"{image_id}.png"
+
+    # Ensure output directory exists
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT_DIR / filename
+
+    config = {
+        "groups": groups,
+        "output_file": str(output_path),
+        "plot_type": plot_type,
+        "title": title,
+        "xlabel": xlabel,
+        "ylabel": ylabel if ylabel else None,
+    }
+
+    script_path = SCRIPTS_DIR / "plot_distribution_comparison.py"
+
+    try:
+        # Execute external script (script code NOT in context)
+        result = subprocess.run(
+            ["python3", str(script_path), json.dumps(config)],
+            capture_output=True,
+            text=True,
+            timeout=60,  # Longer timeout for potentially large datasets
+        )
+
+        if result.returncode != 0:
+            return {"type": "error", "message": result.stderr.strip()}
+
+        # Verify the file was created
+        if not output_path.exists():
+            return {"type": "error", "message": f"Plot file was not created at {output_path}"}
+
+        # Build description
+        group_names = [g["name"] for g in groups]
+        total_points = sum(len(g["values"]) for g in groups)
+
+        # Store metadata in session memory
+        metadata = {
+            "type": "image",
+            "filename": filename,
+            "path": str(output_path),
+            "title": title,
+            "description": f"{plot_type.upper()} plot comparing {len(groups)} group(s): {', '.join(group_names)} ({total_points} total data points)",
+        }
+        _store_image_metadata(image_id, metadata)
+
+        return {
+            "type": "image",
+            "status": "success",
+            "image_id": image_id,
+            "title": title,
+            "plot_type": plot_type,
+            "groups": len(groups),
+            "total_data_points": total_points,
+        }
+
+    except subprocess.TimeoutExpired:
+        return {"type": "error", "message": "Plot generation timed out (60s limit)"}
+    except FileNotFoundError as e:
+        return {"type": "error", "message": f"Script or file not found: {e}"}
+    except Exception as e:
+        return {"type": "error", "message": str(e)}

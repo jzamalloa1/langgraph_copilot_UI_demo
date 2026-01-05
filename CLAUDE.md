@@ -106,7 +106,8 @@ deep-agent-v2/
 │   ├── skill_tools.py          # LangChain tool implementations
 │   ├── tools.py                # tavily_search and other tools
 │   └── scripts/
-│       └── plot_historical_data.py  # External matplotlib script
+│       ├── plot_historical_data.py       # External matplotlib script
+│       └── plot_distribution_comparison.py  # Seaborn distribution plots
 └── copilot-deepagent-app/      # Next.js frontend
     ├── app/
     │   ├── api/
@@ -185,22 +186,49 @@ def your_skill_tool(param1: str, param2: list[float]) -> dict:
 
 In `agent.py`:
 
+1. Add the tool to the import line:
 ```python
-from utils.skill_tools import your_skill_tool
+from utils.skill_tools import plot_historical_data, plot_distribution_comparison, your_skill_tool
+```
 
+2. Add to the `tools` list and add a `ToolCallLimitMiddleware` entry:
+```python
 agent = create_agent(
-    tools=[tavily_search, load_skill, your_skill_tool],
+    tools=[tavily_search, load_skill, plot_historical_data, plot_distribution_comparison, your_skill_tool],
     middleware=[
+        # ... existing middleware ...
         ToolCallLimitMiddleware(tool_name="your_skill_tool", run_limit=1, exit_behavior="end"),
     ],
 )
 ```
 
-### Step 4: Add Skill Documentation
+3. Update the `SYSTEM_PROMPT` to include workflow instructions for the new skill.
 
-Create or add to `utils/skills.md`:
+### Step 4: Add Dependencies (if needed)
+
+If your script requires new packages, add them to `pyproject.toml`:
+
+```toml
+dependencies = [
+    # ... existing deps ...
+    "your-package>=1.0.0",
+]
+```
+
+Then run `uv sync` to install.
+
+### Step 5: Add Skill Documentation
+
+Add a new skill entry to `utils/skills.md`. The file supports multiple skills, each separated by YAML frontmatter blocks:
 
 ```markdown
+---
+name: existing-skill
+description: Existing skill description.
+---
+
+Existing skill content...
+
 ---
 name: your-skill
 description: One-line description of what this skill does.
@@ -216,9 +244,22 @@ your_skill_tool(param1="value", param2=[1.0, 2.0])
 \```
 ```
 
-### Step 5: Frontend Rendering (if applicable)
+Each skill entry starts with `---`, followed by `name:` and `description:` fields, then another `---`, and finally the skill instructions. The parser automatically discovers all skills in the file.
 
-In the frontend, add a `useRenderToolCall` hook if the tool returns visual content.
+### Step 6: Frontend Rendering (if applicable)
+
+If your tool returns an `image_id`, the existing `useRenderToolCall` hook for `plot_historical_data` already handles image rendering via `/api/images/[image_id]`. For tools returning different types of visual content, add a new `useRenderToolCall` hook in the frontend:
+
+```typescript
+useRenderToolCall({
+  name: "your_skill_tool",
+  render: ({ result, status }) => {
+    if (status === "complete" && result?.output_id) {
+      return <YourCustomComponent data={result} />;
+    }
+  },
+});
+```
 
 ## Common Issues
 
@@ -256,8 +297,34 @@ Use `ToolCallLimitMiddleware` in `agent.py`. The `exit_behavior="end"` stops the
 
 This is a known bug (Issue #2622). Use `useCopilotChat().isLoading` for activity indication as a workaround.
 
+## Available Skills
+
+### historical-plotter
+Creates line plots from time series data (dates/values). Uses matplotlib.
+
+```python
+plot_historical_data(dates=["2024-01-01", "2024-01-02"], values=[150.25, 155.50], title="AAPL Stock Price", ylabel="Price ($)")
+```
+
+### distribution-comparison
+Compares distributions of one or more data groups. Uses seaborn.
+
+**Plot types:** `kde`, `histogram`, `ecdf`, `violin`, `box`, `strip`, `swarm`, `ridge`
+
+```python
+plot_distribution_comparison(
+    groups=[
+        {"name": "Treatment", "values": [23.5, 25.1, 22.8, 26.3, 24.9]},
+        {"name": "Control", "values": [20.1, 19.8, 21.2, 18.9, 20.5]}
+    ],
+    plot_type="kde",
+    title="Treatment vs Control",
+    xlabel="Measurement"
+)
+```
+
 ## Dependencies
 
 - Python 3.13+, managed with `uv`
-- Key packages: `langgraph`, `langchain`, `copilotkit`, `matplotlib`, `tavily`
+- Key packages: `langgraph`, `langchain`, `copilotkit`, `matplotlib`, `seaborn`, `pandas`, `tavily`
 - Frontend: Next.js 15, React 19, CopilotKit
