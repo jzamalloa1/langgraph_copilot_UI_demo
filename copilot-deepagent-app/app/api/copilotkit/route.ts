@@ -17,10 +17,14 @@ if (!process.env.LANGSMITH_API_KEY) {
 
 const runtime = new CopilotRuntime({
   agents: {
-    sample_agent: new LangGraphAgent({
+    my_agent: new LangGraphAgent({
       deploymentUrl: process.env.LANGGRAPH_DEPLOYMENT_URL,
       graphId: "my_agent",
       langsmithApiKey: process.env.LANGSMITH_API_KEY,
+      // Set recursion_limit via assistantConfig to override CopilotKit's default of 25
+      assistantConfig: {
+        recursion_limit: 100,
+      },
     }),
   }
 });

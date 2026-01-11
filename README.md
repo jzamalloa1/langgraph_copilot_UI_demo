@@ -282,6 +282,21 @@ cd deep-agent-v2/copilot-deepagent-app
 npm run dev
 ```
 
+## Available Skills
+
+The agent supports multiple skills through progressive disclosure:
+
+| Skill | Tool | Description |
+|-------|------|-------------|
+| `historical-plotter` | `plot_historical_data` | Line plots from time series data |
+| `distribution-comparison` | `plot_distribution_comparison` | Distribution plots (KDE, histogram, violin, box, etc.) |
+| `table-display` | `display_table` | Formatted tabular data display |
+
+Skills are triggered by explicit user requests:
+- **Plot**: "chart", "graph", "plot", "visualize"
+- **Table**: "table", "tabular format", "spreadsheet"
+- **Text** (default): "get", "pull", "fetch", "find"
+
 ## File Structure
 
 ```
@@ -289,13 +304,23 @@ deep-agent-v2/
 ├── agent.py                 # Agent configuration
 ├── utils/
 │   ├── skills.py           # Skill loading (progressive disclosure)
-│   ├── skills.md           # Skill instructions
+│   ├── skills.md           # Skill instructions (YAML frontmatter)
 │   ├── skill_tools.py      # Tool implementations
 │   └── scripts/
-│       └── plot_historical_data.py  # External script (runs on host)
+│       ├── plot_historical_data.py       # Time series plots
+│       ├── plot_distribution_comparison.py  # Distribution plots
+│       └── render_table.py               # Table data generation
 ├── copilot-deepagent-app/   # Next.js frontend
 │   └── app/
-│       ├── api/images/      # Image serving API
-│       └── components/      # UI components
+│       ├── api/
+│       │   ├── copilotkit/  # CopilotKit runtime
+│       │   ├── images/      # Image serving API
+│       │   └── tables/      # Table data API
+│       └── components/
+│           ├── GenerativeUIDemo.tsx  # Main UI with useRenderToolCall hooks
+│           ├── ImageDisplay.tsx      # Image gallery component
+│           └── TableDisplay.tsx      # Table rendering component
 └── langgraph.json          # LangGraph configuration
 ```
+
+For detailed development guidance, see [CLAUDE.md](CLAUDE.md).

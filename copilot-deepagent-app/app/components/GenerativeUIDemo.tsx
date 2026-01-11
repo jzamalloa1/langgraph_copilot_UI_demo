@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import { useCoAgentStateRender, useFrontendTool, useRenderToolCall, useCopilotChat } from "@copilotkit/react-core";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { useCoAgent, useCoAgentStateRender, useFrontendTool, useRenderToolCall, useCopilotChat } from "@copilotkit/react-core";
 import { CopilotChat } from "@copilotkit/react-ui";
 import { ImageDisplay } from "./ImageDisplay";
-import { parseImageFromState } from "@/lib/imageUtils";
+import { TableDisplay } from "./TableDisplay";
 
 interface ImageData {
   url: string;
@@ -18,6 +18,15 @@ export function GenerativeUIDemo() {
 
   // Get loading state from CopilotKit
   const { isLoading } = useCopilotChat();
+
+  // Configure the agent with recursion_limit to prevent infinite loops
+  // Note: recursion_limit must be at the top level of config, not inside configurable
+  useCoAgent({
+    name: "my_agent",
+    config: {
+      recursion_limit: 100,
+    },
+  });
 
   // Update agent status based on loading state
   useEffect(() => {
@@ -153,67 +162,72 @@ export function GenerativeUIDemo() {
     },
   });
 
-  // Render plot_historical_data tool calls with custom UI
-  useRenderToolCall({
-    name: "plot_historical_data",
-    render: ({ args, result, status }) => {
-      console.log("[plot_historical_data] Rendering tool call:", { args, result, status });
+  // Track completed plot image IDs to add to gallery
+  const [pendingImageId, setPendingImageId] = useState<{id: string, title: string} | null>(null);
+  // Track which image IDs have already been scheduled to prevent duplicate setTimeout calls
+  const scheduledImageIdsRef = useRef<Set<string>>(new Set());
 
+  // Effect to add pending images to gallery (avoids setState during render)
+  useEffect(() => {
+    if (pendingImageId) {
+      const displayUrl = `/api/images/${pendingImageId.id}`;
+      setImages((prev) => {
+        if (prev.some((img) => img.url === displayUrl)) {
+          return prev;
+        }
+        return [...prev, { url: displayUrl, title: pendingImageId.title, timestamp: Date.now() }];
+      });
+      setPendingImageId(null);
+    }
+  }, [pendingImageId]);
+
+  // Helper function to render plot tool results
+  const renderPlotToolCall = (toolName: string, color: string) => ({
+    name: toolName,
+    render: ({ args, result, status }: { args: Record<string, unknown>; result: unknown; status: string }) => {
       // Parse result if it's a string
-      let parsedResult = result;
+      let parsedResult = result as Record<string, unknown> | null;
       if (typeof result === "string") {
         try {
           parsedResult = JSON.parse(result);
         } catch {
-          // Not JSON
+          parsedResult = null;
         }
       }
-
-      // If successful, add image to display
-      useEffect(() => {
-        if (status === "complete" && parsedResult?.status === "success" && parsedResult?.image_id) {
-          const displayUrl = `/api/images/${parsedResult.image_id}`;
-          setImages((prev) => {
-            // Avoid duplicates
-            if (prev.some((img) => img.url === displayUrl)) {
-              return prev;
-            }
-            return [
-              ...prev,
-              {
-                url: displayUrl,
-                title: parsedResult.title || args?.title || "Generated Plot",
-                timestamp: Date.now(),
-              },
-            ];
-          });
-        }
-      }, [status, parsedResult, args]);
 
       // Render inline preview (smaller size)
       if (status === "executing") {
         return (
           <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
             <div className="flex items-center gap-2">
-              <div className="animate-spin h-3 w-3 border-2 border-violet-400 border-t-transparent rounded-full" />
-              <span className="text-xs text-slate-300">Generating: {args?.title || "plot..."}</span>
+              <div className={`animate-spin h-3 w-3 border-2 border-${color}-400 border-t-transparent rounded-full`} />
+              <span className="text-xs text-slate-300">Generating: {(args?.title as string) || "plot..."}</span>
             </div>
           </div>
         );
       }
 
-      if (status === "complete" && parsedResult?.status === "success") {
+      if (status === "complete" && parsedResult?.status === "success" && parsedResult?.image_id) {
+        const imageId = parsedResult.image_id as string;
+        const title = (parsedResult.title as string) || (args?.title as string) || "Generated Plot";
+        const displayUrl = `/api/images/${imageId}`;
+
+        // Schedule state update via effect (not during render)
+        // Only schedule if this image hasn't been scheduled yet to prevent scroll jumps
+        if (!scheduledImageIdsRef.current.has(imageId)) {
+          scheduledImageIdsRef.current.add(imageId);
+          setTimeout(() => setPendingImageId({ id: imageId, title }), 0);
+        }
+
         return (
           <div className="p-2.5 bg-emerald-500/10 rounded-lg border border-emerald-500/30 my-2">
             <div className="flex items-center gap-1.5 mb-2">
               <span className="text-emerald-400 text-sm">&#10003;</span>
-              <span className="text-xs text-emerald-300 font-medium">
-                {parsedResult.title || args?.title}
-              </span>
+              <span className="text-xs text-emerald-300 font-medium">{title}</span>
             </div>
             <img
-              src={`/api/images/${parsedResult.image_id}`}
-              alt={parsedResult.title || "Generated plot"}
+              src={displayUrl}
+              alt={title}
               className="max-w-[280px] rounded-lg border border-slate-700/50"
             />
           </div>
@@ -223,7 +237,7 @@ export function GenerativeUIDemo() {
       if (parsedResult?.type === "error") {
         return (
           <div className="p-2.5 bg-rose-500/10 rounded-lg border border-rose-500/30 my-2">
-            <span className="text-xs text-rose-400">Error: {parsedResult.message}</span>
+            <span className="text-xs text-rose-400">Error: {parsedResult.message as string}</span>
           </div>
         );
       }
@@ -237,75 +251,66 @@ export function GenerativeUIDemo() {
     },
   });
 
-  // Render agent state
-  useCoAgentStateRender({
-    name: "sample_agent",
-    render: ({ state }) => {
-      // Update status based on agent state
-      if (state?.status) {
-        setAgentStatus(state.status);
+  // Render plot_historical_data tool calls with custom UI
+  useRenderToolCall(renderPlotToolCall("plot_historical_data", "violet"));
+
+  // Render plot_distribution_comparison tool calls with custom UI
+  useRenderToolCall(renderPlotToolCall("plot_distribution_comparison", "teal"));
+
+  // Render display_table tool calls with custom UI
+  useRenderToolCall({
+    name: "display_table",
+    render: ({ args, result, status }: { args: Record<string, unknown>; result: unknown; status: string }) => {
+      // Parse result if it's a string
+      let parsedResult = result as Record<string, unknown> | null;
+      if (typeof result === "string") {
+        try {
+          parsedResult = JSON.parse(result);
+        } catch {
+          parsedResult = null;
+        }
       }
 
-      // Parse and handle image data from state
-      const imageData = parseImageFromState(state);
-      if (imageData) {
-        setImages((prev) => {
-          // Avoid duplicates
-          if (prev.some((img) => img.url === imageData.url)) {
-            return prev;
-          }
-          return [
-            ...prev,
-            {
-              url: imageData.url,
-              title: imageData.title || "Agent Generated Plot",
-              timestamp: imageData.timestamp || Date.now(),
-            },
-          ];
-        });
+      if (status === "executing") {
+        return (
+          <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
+            <div className="flex items-center gap-2">
+              <div className="animate-spin h-3 w-3 border-2 border-cyan-400 border-t-transparent rounded-full" />
+              <span className="text-xs text-slate-300">Generating table: {(args?.title as string) || "..."}</span>
+            </div>
+          </div>
+        );
       }
 
-      // Render agent state UI
-      if (!state || Object.keys(state).length === 0) {
-        return null;
+      if (status === "complete" && parsedResult?.status === "success" && parsedResult?.table_id) {
+        const tableId = parsedResult.table_id as string;
+        const title = (parsedResult.title as string) || (args?.title as string) || "Data Table";
+
+        return <TableDisplay tableId={tableId} title={title} />;
       }
 
+      if (parsedResult?.type === "error") {
+        return (
+          <div className="p-2.5 bg-rose-500/10 rounded-lg border border-rose-500/30 my-2">
+            <span className="text-xs text-rose-400">Error: {parsedResult.message as string}</span>
+          </div>
+        );
+      }
+
+      // Default: show processing state
       return (
-        <div className="p-3 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
-          <div className="text-xs font-medium text-slate-400 mb-2">Agent State</div>
-
-          {/* Current Step */}
-          {state.current_step && (
-            <div className="text-xs text-slate-300 mb-1">
-              <span className="text-slate-500">Step:</span> {state.current_step}
-            </div>
-          )}
-
-          {/* Progress Bar */}
-          {state.progress !== undefined && (
-            <div className="mb-2">
-              <div className="flex justify-between text-xs mb-0.5">
-                <span className="text-slate-500">Progress</span>
-                <span className="text-slate-300">{Math.round(state.progress)}%</span>
-              </div>
-              <div className="w-full bg-slate-700 rounded-full h-1.5">
-                <div
-                  className="bg-gradient-to-r from-violet-500 to-fuchsia-500 h-1.5 rounded-full transition-all duration-300"
-                  style={{ width: `${state.progress}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Status Message */}
-          {state.message && (
-            <div className="text-xs text-slate-300 bg-slate-900/50 p-1.5 rounded border border-slate-700/50">
-              {state.message}
-            </div>
-          )}
+        <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
+          <span className="text-xs text-slate-400">Processing table...</span>
         </div>
       );
     },
+  });
+
+  // Agent state render - returns null to avoid cluttering the chat
+  // Activity indication is handled by the isLoading state in the main UI
+  useCoAgentStateRender({
+    name: "my_agent",
+    render: () => null,
   });
 
   const clearAllImages = useCallback(() => {
@@ -320,10 +325,10 @@ export function GenerativeUIDemo() {
           {/* Header - compact */}
           <header className="mb-6">
             <h1 className="text-2xl font-bold bg-gradient-to-r from-violet-400 via-fuchsia-400 to-cyan-400 bg-clip-text text-transparent">
-              Data Visualization Agent
+              Data Analysis Agent
             </h1>
             <p className="text-sm text-slate-400 mt-1">
-              Ask me to plot stock prices, trends, or any historical data
+              Fetch data, analyze trends, and create visualizations
             </p>
           </header>
 
@@ -359,25 +364,9 @@ export function GenerativeUIDemo() {
                 </div>
               </div>
 
-              {/* Animated progress steps */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-xs">
-                  <div className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                  <span className="text-slate-400">Searching for data...</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <div className="w-1.5 h-1.5 rounded-full bg-fuchsia-400 animate-pulse" style={{ animationDelay: '0.2s' }} />
-                  <span className="text-slate-400">Loading skills...</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <div className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" style={{ animationDelay: '0.4s' }} />
-                  <span className="text-slate-400">Generating visualization...</span>
-                </div>
-              </div>
-
               {/* Progress bar animation */}
-              <div className="mt-3 h-1 bg-slate-700 rounded-full overflow-hidden">
-                <div className="h-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 rounded-full animate-pulse" style={{ width: '60%' }} />
+              <div className="mt-2 h-1 bg-slate-700 rounded-full overflow-hidden">
+                <div className="h-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 rounded-full animate-progress" style={{ width: '100%' }} />
               </div>
             </div>
           )}
