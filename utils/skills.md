@@ -74,3 +74,56 @@ plot_distribution_comparison(
     plot_type="box",
     title="Comparison Across Groups"
 )
+```
+
+---
+name: table-display
+description: Display tabular data as a formatted, styled table in the UI.
+---
+
+Call `display_table` with:
+- columns: list of column header names (strings)
+- rows: list of rows, each row is a list of values matching the column count
+- title: table title (default: "Data Table")
+- caption: optional description below the table
+
+## When to Use
+
+Use `display_table` when:
+- User asks to show data "as a table" or "in tabular format"
+- User asks for a "table", "spreadsheet view", or "data grid"
+- The result is naturally tabular (e.g., stock prices over time, comparison data)
+- User explicitly requests NOT to plot/visualize but wants structured data display
+
+Do NOT use for:
+- Simple key-value pairs (just present as text)
+- Single data points
+- When user asks for a chart/plot/visualization
+
+## Examples
+
+Stock price data:
+```
+display_table(
+    columns=["Date", "Open", "High", "Low", "Close", "Volume"],
+    rows=[
+        ["2024-01-08", "185.20", "186.50", "184.80", "185.90", "45.2M"],
+        ["2024-01-09", "186.10", "187.30", "185.50", "186.80", "52.1M"],
+        ["2024-01-10", "186.90", "188.00", "186.20", "187.50", "48.7M"]
+    ],
+    title="AAPL Stock Prices",
+    caption="Last 3 trading days"
+)
+```
+
+Comparison data:
+```
+display_table(
+    columns=["Metric", "Q1 2024", "Q2 2024", "Change"],
+    rows=[
+        ["Revenue", "$10.5M", "$12.3M", "+17.1%"],
+        ["Users", "45,000", "52,000", "+15.6%"],
+        ["Churn Rate", "3.2%", "2.8%", "-12.5%"]
+    ],
+    title="Quarterly Performance"
+)

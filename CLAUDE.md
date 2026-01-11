@@ -1,6 +1,6 @@
 # Deep Agent V2 - Claude Code Guide
 
-LangGraph agent with progressive disclosure skills and CopilotKit Generative UI integration.
+LangGraph data analysis agent with progressive disclosure skills and CopilotKit Generative UI integration.
 
 ## Quick Start
 
@@ -45,6 +45,16 @@ Frontend env in `copilot-deepagent-app/.env`:
 
 ## Key Patterns
 
+### 0. CopilotKit-First UI Development
+
+**IMPORTANT**: Before building any custom UI components, ALWAYS check CopilotKit's built-in features first:
+
+1. **Check CopilotKit hooks**: `useRenderToolCall`, `useFrontendTool`, `useCoAgentStateRender`
+2. **Check CopilotKit components**: `CopilotChat`, `CopilotPopup`, `CopilotSidebar`, `Markdown`, `ImageRenderer`
+3. **Check node_modules types**: `@copilotkit/react-core` and `@copilotkit/react-ui` for available props
+
+CopilotKit provides the Generative UI pattern through `useRenderToolCall` - use this to render custom components inline in the chat for tool results. Only create custom components (like `TableDisplay.tsx`) when CopilotKit doesn't have a built-in equivalent.
+
 ### 1. Progressive Disclosure
 
 Skills are disclosed in two levels to minimize context usage:
@@ -65,16 +75,25 @@ Each skill that generates output uses two files:
 The tool validates inputs, generates IDs, calls the script via `subprocess.run()`, and returns metadata.
 The script receives JSON config, does heavy work (matplotlib, etc.), saves output to `/tmp/`.
 
-### 3. Tool Loop Prevention
+### 3. Tool Call Limits
 
-`ToolCallLimitMiddleware` enforces hard limits at framework level:
+`ToolCallLimitMiddleware` enforces limits at framework level to prevent infinite loops while allowing multi-step workflows:
 
 ```python
 middleware=[
-    ToolCallLimitMiddleware(tool_name="tavily_search", run_limit=1, exit_behavior="end"),
+    # Allow multiple searches for multi-series data fetching
+    ToolCallLimitMiddleware(tool_name="tavily_search", run_limit=5, exit_behavior="end"),
+    # Allow loading different skills as needed
+    ToolCallLimitMiddleware(tool_name="load_skill", run_limit=3, exit_behavior="end"),
+    # Limit plotting tools to 1 per request (prevents duplicate plots)
     ToolCallLimitMiddleware(tool_name="plot_historical_data", run_limit=1, exit_behavior="end"),
+    ToolCallLimitMiddleware(tool_name="plot_distribution_comparison", run_limit=1, exit_behavior="end"),
+    # Limit table tool to 1 per request
+    ToolCallLimitMiddleware(tool_name="display_table", run_limit=1, exit_behavior="end"),
 ]
 ```
+
+The limits are set to support common workflows like fetching data for multiple stocks (AAPL, MSFT, etc.) while preventing duplicate outputs.
 
 ### 4. Frontend Tool Result Rendering
 
@@ -107,13 +126,18 @@ deep-agent-v2/
 │   ├── tools.py                # tavily_search and other tools
 │   └── scripts/
 │       ├── plot_historical_data.py       # External matplotlib script
-│       └── plot_distribution_comparison.py  # Seaborn distribution plots
+│       ├── plot_distribution_comparison.py  # Seaborn distribution plots
+│       └── render_table.py               # Table data generation
 └── copilot-deepagent-app/      # Next.js frontend
     ├── app/
     │   ├── api/
     │   │   ├── copilotkit/route.ts  # CopilotKit runtime
-    │   │   └── images/[filename]/   # Serves /tmp/plots/
+    │   │   ├── images/[filename]/   # Serves /tmp/plots/
+    │   │   └── tables/[tableId]/    # Serves /tmp/tables/
     │   ├── components/
+    │   │   ├── GenerativeUIDemo.tsx # Main UI with useRenderToolCall hooks
+    │   │   ├── ImageDisplay.tsx     # Image gallery component
+    │   │   └── TableDisplay.tsx     # Table rendering component
     │   ├── page.tsx
     │   └── globals.css         # Contains CopilotKit scrolling fix
     └── package.json
@@ -297,6 +321,38 @@ Use `ToolCallLimitMiddleware` in `agent.py`. The `exit_behavior="end"` stops the
 
 This is a known bug (Issue #2622). Use `useCopilotChat().isLoading` for activity indication as a workaround.
 
+### CopilotKit recursion limit issues
+
+CopilotKit overrides the `recursion_limit` set in `agent.py` with its own default of 25. The solution is to set it in **three places** to ensure it's applied correctly:
+
+1. **Backend** (`agent.py`): Set via `.with_config({"recursion_limit": 100})`
+2. **CopilotKit Runtime** (`app/api/copilotkit/route.ts`): Set via `assistantConfig` - **THIS IS THE KEY FIX**:
+   ```typescript
+   new LangGraphAgent({
+     deploymentUrl: process.env.LANGGRAPH_DEPLOYMENT_URL,
+     graphId: "my_agent",
+     langsmithApiKey: process.env.LANGSMITH_API_KEY,
+     assistantConfig: {
+       recursion_limit: 100,
+     },
+   })
+   ```
+3. **Frontend** (`useCoAgent` hook): Set in config for additional safety:
+   ```typescript
+   useCoAgent({
+     name: "my_agent",
+     config: {
+       recursion_limit: 100,
+     },
+   });
+   ```
+
+The `assistantConfig.recursion_limit` in the LangGraphAgent constructor is passed directly to the LangGraph SDK's `Config` type and properly overrides CopilotKit's default.
+
+See [Issue #1717](https://github.com/CopilotKit/CopilotKit/issues/1717) for background.
+
+**IMPORTANT**: Do NOT suggest using `langgraph.prebuilt.create_react_agent` - it is outdated. Always use `langchain.agents.create_agent`.
+
 ## Available Skills
 
 ### historical-plotter
@@ -320,6 +376,21 @@ plot_distribution_comparison(
     plot_type="kde",
     title="Treatment vs Control",
     xlabel="Measurement"
+)
+```
+
+### table-display
+Displays tabular data as a formatted table in the UI. Activated when user explicitly asks for a "table" or "tabular format".
+
+```python
+display_table(
+    columns=["Date", "Open", "High", "Low", "Close"],
+    rows=[
+        ["2024-01-08", "185.20", "186.50", "184.80", "185.90"],
+        ["2024-01-09", "186.10", "187.30", "185.50", "186.80"]
+    ],
+    title="AAPL Stock Prices",
+    caption="Last 2 trading days"
 )
 ```
 

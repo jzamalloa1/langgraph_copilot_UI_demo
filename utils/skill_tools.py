@@ -16,9 +16,11 @@ from langchain_core.tools import tool
 
 SCRIPTS_DIR = Path(__file__).parent / "scripts"
 OUTPUT_DIR = Path("/tmp/plots")
+TABLES_DIR = Path("/tmp/tables")
 
 # In-memory metadata store (no base64, just references)
 _session_images: dict[str, dict] = {}
+_session_tables: dict[str, dict] = {}
 
 
 def _store_image_metadata(image_id: str, metadata: dict):
@@ -34,6 +36,16 @@ def _get_image_metadata(image_id: str) -> dict | None:
 def _list_image_metadata() -> list[dict]:
     """List all stored image metadata."""
     return [{"image_id": k, **v} for k, v in _session_images.items()]
+
+
+def _store_table_metadata(table_id: str, metadata: dict):
+    """Store table metadata in session memory."""
+    _session_tables[table_id] = metadata
+
+
+def _get_table_metadata(table_id: str) -> dict | None:
+    """Retrieve table metadata from session memory."""
+    return _session_tables.get(table_id)
 
 
 @tool(parse_docstring=True)
@@ -275,6 +287,100 @@ def plot_distribution_comparison(
 
     except subprocess.TimeoutExpired:
         return {"type": "error", "message": "Plot generation timed out (60s limit)"}
+    except FileNotFoundError as e:
+        return {"type": "error", "message": f"Script or file not found: {e}"}
+    except Exception as e:
+        return {"type": "error", "message": str(e)}
+
+
+@tool(parse_docstring=True)
+def display_table(
+    columns: list[str],
+    rows: list[list],
+    title: str = "Data Table",
+    caption: str = "",
+) -> dict:
+    """Display tabular data as a formatted table. Load skill 'table-display' for usage details.
+
+    Args:
+        columns: List of column header names
+        rows: List of rows, where each row is a list of values (strings, numbers, etc.)
+        title: Table title displayed above the table
+        caption: Optional description or caption below the table
+
+    Returns:
+        Dictionary with table_id for retrieval and display
+    """
+    # Validate inputs
+    if not columns:
+        return {"type": "error", "message": "columns cannot be empty"}
+    if not rows:
+        return {"type": "error", "message": "rows cannot be empty"}
+
+    num_cols = len(columns)
+    for i, row in enumerate(rows):
+        if len(row) != num_cols:
+            return {
+                "type": "error",
+                "message": f"Row {i} has {len(row)} values but expected {num_cols} columns. Ensure all rows have the same number of values as columns.",
+            }
+
+    # Generate unique table ID
+    table_id = f"table_{uuid.uuid4().hex[:8]}"
+    filename = f"{table_id}.json"
+
+    # Ensure output directory exists
+    TABLES_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = TABLES_DIR / filename
+
+    config = {
+        "columns": columns,
+        "rows": rows,
+        "output_file": str(output_path),
+        "title": title,
+        "caption": caption if caption else None,
+    }
+
+    script_path = SCRIPTS_DIR / "render_table.py"
+
+    try:
+        # Execute external script
+        result = subprocess.run(
+            ["python3", str(script_path), json.dumps(config)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            return {"type": "error", "message": result.stderr.strip()}
+
+        # Verify the file was created
+        if not output_path.exists():
+            return {"type": "error", "message": f"Table file was not created at {output_path}"}
+
+        # Store metadata in session memory
+        metadata = {
+            "type": "table",
+            "filename": filename,
+            "path": str(output_path),
+            "title": title,
+            "caption": caption,
+            "description": f"Table with {len(columns)} columns and {len(rows)} rows",
+        }
+        _store_table_metadata(table_id, metadata)
+
+        return {
+            "type": "table",
+            "status": "success",
+            "table_id": table_id,
+            "title": title,
+            "columns": len(columns),
+            "rows": len(rows),
+        }
+
+    except subprocess.TimeoutExpired:
+        return {"type": "error", "message": "Table generation timed out"}
     except FileNotFoundError as e:
         return {"type": "error", "message": f"Script or file not found: {e}"}
     except Exception as e:
