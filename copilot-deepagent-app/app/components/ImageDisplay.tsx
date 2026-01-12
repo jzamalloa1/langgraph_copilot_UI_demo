@@ -22,6 +22,11 @@ export function ImageDisplay({
   const [hasError, setHasError] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
 
+  // Guard against empty/invalid URLs - don't render anything
+  if (!url || url.trim() === "") {
+    return null;
+  }
+
   const proxiedUrl = getProxiedImageUrl(url);
 
   const handleDownload = async () => {

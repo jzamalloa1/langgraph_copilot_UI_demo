@@ -1,91 +1,168 @@
+"""
+Orchestrator Agent
+
+The main agent that coordinates specialized sub-agents to complete data analysis tasks.
+It plans work and delegates to sub-agents - it does NOT execute tasks directly.
+
+Sub-agents are wrapped as tools using the @tool decorator pattern as documented:
+https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
+
+DO NOT use create_deep_agent - we manually implement the orchestrator pattern
+with create_agent for full customization control.
+"""
+
 from langchain.agents import create_agent
-from langchain.agents.middleware.summarization import SummarizationMiddleware
-from langchain.agents.middleware import ToolCallLimitMiddleware
+from langchain.agents.middleware import TodoListMiddleware, SummarizationMiddleware
+from langchain_core.tools import tool
 
-from utils.tools import tavily_search
-from utils.skills import load_skill, get_skills_summary
-from utils.skill_tools import plot_historical_data, plot_distribution_comparison, display_table
+from agents.subagents import (
+    create_web_research_agent,
+    create_plot_analytics_agent,
+    create_display_data_agent,
+)
 
 
-SYSTEM_PROMPT = f"""You are a data analysis assistant that can fetch, analyze, and visualize data.
-{get_skills_summary()}
+# Orchestrator system prompt - focused on coordination, not execution
+ORCHESTRATOR_PROMPT = """You are an orchestrator agent that coordinates specialized sub-agents to complete data analysis tasks.
 
-## Capabilities
+## Your Role
+You are a COORDINATOR, not an executor. You:
+1. Analyze user requests to understand what needs to be done
+2. Plan the sequence of tasks needed (use write_todos for complex multi-step tasks)
+3. Delegate tasks to the appropriate sub-agents
+4. Collect results and determine if the objective is complete
+5. Provide a final response to the user
 
-1. **Data Retrieval**: Use tavily_search to fetch data from the web
-2. **Data Presentation**: Present data as text, tables, or summaries
-3. **Visualization**: Create plots when the user requests visual output
+## Available Sub-Agents
 
-## When to Plot vs Table vs Text
+You have access to these specialized sub-agents (call them as tools):
 
-- **Plot ONLY if**: User explicitly uses words like "chart", "graph", "plot", "visualize", "visualization", or "show as image"
-- **Table ONLY if**: User explicitly asks for a "table", "tabular format", "spreadsheet", or "data grid"
-- **Text (default)**: User asks to "get", "pull", "fetch", "find", or just wants data - present as plain text
-- **IMPORTANT**: If the user does NOT mention visualization or table, do NOT call plot or table tools. Just present the data as text.
+### web_research
+- **Purpose**: Search the web and retrieve structured data
+- **Use for**: Finding stock prices, statistics, facts, any web data
+- **Returns**: Structured data (dates, values, facts) ready for use
 
-## Workflow Guidelines
+### plot_analytics
+- **Purpose**: Create visualizations from data
+- **Use for**: Line plots, distribution comparisons, any charts
+- **Requires**: Structured data (from web_research or user-provided)
+- **Returns**: image_id for the generated plot
 
-### Data retrieval only (no plot):
-1. tavily_search → get data
-2. Present the data clearly to user (as text/table)
+### display_data
+- **Purpose**: Display data in formatted tables
+- **Use for**: Tabular data, comparisons, structured information
+- **Requires**: Columns and rows of data
+- **Returns**: table_id for the generated table
+
+## Workflow Patterns
+
+### Pattern 1: Data Retrieval Only
+User asks for information without visualization:
+1. Call web_research with the query
+2. Present the findings to the user
 3. STOP
 
-### Single time series plot:
-1. tavily_search → get data
-2. load_skill("historical-plotter") → get format
-3. plot_historical_data → create plot
-4. Reply with image_id → STOP
+### Pattern 2: Plot Request
+User asks to visualize data:
+1. Call web_research to get the data
+2. Pass the structured data to plot_analytics
+3. Report the image_id to the user
+4. STOP
 
-### Multiple series (e.g., AAPL and MSFT):
-1. tavily_search for first series → store results
-2. tavily_search for second series → store results
-3. load_skill (choose appropriate skill)
-4. Create plot(s) with collected data
-5. Reply with image_id(s) → STOP
+### Pattern 3: Table Request
+User asks to display data as a table:
+1. Call web_research to get the data
+2. Pass the structured data to display_data
+3. Report the table_id to the user
+4. STOP
 
-### Distribution comparison:
-1. Collect data for each group (via tavily_search or user-provided)
-2. load_skill("distribution-comparison") → get format
-3. plot_distribution_comparison → create plot
-4. Reply with image_id → STOP
-
-### Table display:
-1. tavily_search → get data
-2. load_skill("table-display") → get format
-3. display_table → create table with columns and rows
-4. Reply with table_id → STOP
+### Pattern 4: Multi-step Analysis
+User asks for complex analysis:
+1. Use write_todos to plan the steps
+2. Execute each step by calling appropriate sub-agents
+3. Mark todos complete as you go
+4. Provide final summary when all done
 
 ## Critical Rules
-- NEVER call plot tools unless the user explicitly asks for a visualization
-- NEVER call display_table unless the user explicitly asks for a table
-- After a plot tool returns successfully with an image_id, respond briefly (e.g., "Here's the plot") and STOP
-- After display_table returns successfully with a table_id, respond briefly (e.g., "Here's the table") and STOP - do NOT repeat the table data in text
-- When a visualization or table is displayed, do NOT duplicate the data in your text response - the UI already shows it
-- NEVER call the same tool twice for a single user request
-- After completing the user's request, STOP and wait for next instruction
-- On any error, tell user and STOP
-- Do NOT ask clarifying questions if the request is clear"""
+
+1. **NEVER execute tasks yourself** - always delegate to sub-agents
+2. **Pass data between sub-agents** - web_research gets data, others consume it
+3. **One visualization per request** - don't create multiple plots unless explicitly asked
+4. **Output format matters**:
+   - For plots: Report the image_id so the UI can display it
+   - For tables: Report the table_id so the UI can display it
+   - For text: Present the data clearly
+5. **Use write_todos for complex tasks** - helps track multi-step work
+6. **After sub-agent completes, decide next step** - don't keep calling the same agent
+7. **Do NOT duplicate data in text** - when a visualization or table is displayed, the UI shows it
+
+## Determining Output Type
+
+- **Plot**: User says "chart", "graph", "plot", "visualize", "visualization"
+- **Table**: User says "table", "tabular", "spreadsheet", "grid"
+- **Text**: User says "get", "find", "what is", or just asks a question
+
+## Example Interactions
+
+User: "Plot AAPL stock price"
+→ Call web_research("AAPL stock price historical data")
+→ Pass dates/values to plot_analytics
+→ Return: "Here's the plot" with image_id
+
+User: "Show me GDP growth as a table"
+→ Call web_research("GDP growth data")
+→ Pass columns/rows to display_data
+→ Return: "Here's the table" with table_id
+
+User: "What is the current price of Bitcoin?"
+→ Call web_research("Bitcoin current price")
+→ Return: Present the answer as text"""
 
 
+# Create sub-agents (these are full agents with their own tools and middleware)
+_web_research_agent = create_web_research_agent()
+_plot_analytics_agent = create_plot_analytics_agent()
+_display_data_agent = create_display_data_agent()
+
+
+# Wrap sub-agents as tools using @tool decorator (documented pattern)
+# See: https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
+@tool("web_research")
+def web_research(query: str) -> str:
+    """Search the web for data and information. Use this to find stock prices, statistics, facts, or any data from the internet. Pass a clear query describing what data you need. Returns structured data (dates, values, facts)."""
+    result = _web_research_agent.invoke({"messages": [{"role": "user", "content": query}]})
+    return result["messages"][-1].content
+
+
+@tool("plot_analytics")
+def plot_analytics(task: str) -> str:
+    """Create visualizations and plots from data. Pass the structured data (dates, values, groups) along with the plot type needed. For time series, provide dates and values. For distributions, provide groups with values. Returns image_id."""
+    result = _plot_analytics_agent.invoke({"messages": [{"role": "user", "content": task}]})
+    return result["messages"][-1].content
+
+
+@tool("display_data")
+def display_data(task: str) -> str:
+    """Display data as a formatted table. Pass the columns (list of headers) and rows (list of data rows) to display. Returns table_id."""
+    result = _display_data_agent.invoke({"messages": [{"role": "user", "content": task}]})
+    return result["messages"][-1].content
+
+
+# Collect sub-agent tools
+subagent_tools = [web_research, plot_analytics, display_data]
+
+
+# Main orchestrator agent - this is what LangGraph runs
 agent = create_agent(
-    model="openai:gpt-5-nano",
-    system_prompt=SYSTEM_PROMPT,
-    tools=[tavily_search, load_skill, plot_historical_data, plot_distribution_comparison, display_table],
+    model="openai:gpt-4o",  # Use capable model for orchestration
+    system_prompt=ORCHESTRATOR_PROMPT,
+    tools=subagent_tools,
     middleware=[
-        # Allow multiple searches for multi-series data fetching
-        ToolCallLimitMiddleware(tool_name="tavily_search", run_limit=5, exit_behavior="end"),
-        # Allow loading different skills as needed
-        ToolCallLimitMiddleware(tool_name="load_skill", run_limit=3, exit_behavior="end"),
-        # Limit plotting tools to 1 per request (prevents duplicate plots)
-        ToolCallLimitMiddleware(tool_name="plot_historical_data", run_limit=1, exit_behavior="end"),
-        ToolCallLimitMiddleware(tool_name="plot_distribution_comparison", run_limit=1, exit_behavior="end"),
-        # Limit table tool to 1 per request
-        ToolCallLimitMiddleware(tool_name="display_table", run_limit=1, exit_behavior="end"),
+        TodoListMiddleware(),  # For planning complex multi-step tasks
         SummarizationMiddleware(
             model="openai:gpt-5-nano",
             trigger=("fraction", 0.75),
             keep=("fraction", 0.10),
-            trim_tokens_to_summarize=None,
         ),
     ],
 ).with_config({"recursion_limit": 100})

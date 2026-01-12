@@ -12,6 +12,47 @@ interface ImageData {
   timestamp: number;
 }
 
+// Safe image component that only renders when src is valid
+function SafeImage({ src, alt, className }: { src: string | null | undefined; alt: string; className?: string }) {
+  if (!src || src.trim() === "") {
+    return null;
+  }
+  return <img src={src} alt={alt} className={className} />;
+}
+
+// Custom markdown image renderer that guards against empty URLs
+// This prevents the "empty src" error from CopilotKit's markdown rendering
+const safeMarkdownComponents = {
+  img: ({ src, alt, ...props }: { src?: string; alt?: string; [key: string]: unknown }) => {
+    if (!src || typeof src !== "string" || src.trim() === "") {
+      return null;
+    }
+    return (
+      <img
+        src={src}
+        alt={alt || "Image"}
+        className="max-w-full h-auto rounded-lg border border-slate-700/50 my-2"
+        {...props}
+      />
+    );
+  },
+};
+
+// Helper to safely convert result to string for parsing
+function resultToString(result: unknown): string {
+  if (result === null || result === undefined) {
+    return "";
+  }
+  if (typeof result === "string") {
+    return result;
+  }
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return "";
+  }
+}
+
 export function GenerativeUIDemo() {
   const [images, setImages] = useState<ImageData[]>([]);
   const [agentStatus, setAgentStatus] = useState<string>("Ready");
@@ -106,62 +147,6 @@ export function GenerativeUIDemo() {
     },
   });
 
-  // Render tavily_search tool calls with custom UI
-  useRenderToolCall({
-    name: "tavily_search",
-    render: ({ args, status }) => {
-      if (status === "executing") {
-        return (
-          <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
-            <div className="flex items-center gap-2">
-              <div className="animate-spin h-3 w-3 border-2 border-cyan-400 border-t-transparent rounded-full" />
-              <span className="text-xs text-slate-300">
-                Searching: <span className="text-cyan-400">{args?.query || "..."}</span>
-              </span>
-            </div>
-          </div>
-        );
-      }
-      // Complete state
-      return (
-        <div className="p-2.5 bg-cyan-500/10 rounded-lg border border-cyan-500/30 my-2">
-          <div className="flex items-center gap-1.5">
-            <span className="text-cyan-400 text-sm">&#10003;</span>
-            <span className="text-xs text-cyan-300">Search complete</span>
-          </div>
-        </div>
-      );
-    },
-  });
-
-  // Render load_skill tool calls with custom UI
-  useRenderToolCall({
-    name: "load_skill",
-    render: ({ args, status }) => {
-      if (status === "executing") {
-        return (
-          <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
-            <div className="flex items-center gap-2">
-              <div className="animate-spin h-3 w-3 border-2 border-fuchsia-400 border-t-transparent rounded-full" />
-              <span className="text-xs text-slate-300">
-                Loading skill: <span className="text-fuchsia-400">{args?.skill_name || "..."}</span>
-              </span>
-            </div>
-          </div>
-        );
-      }
-      // Complete state
-      return (
-        <div className="p-2.5 bg-fuchsia-500/10 rounded-lg border border-fuchsia-500/30 my-2">
-          <div className="flex items-center gap-1.5">
-            <span className="text-fuchsia-400 text-sm">&#10003;</span>
-            <span className="text-xs text-fuchsia-300">Skill loaded: {args?.skill_name}</span>
-          </div>
-        </div>
-      );
-    },
-  });
-
   // Track completed plot image IDs to add to gallery
   const [pendingImageId, setPendingImageId] = useState<{id: string, title: string} | null>(null);
   // Track which image IDs have already been scheduled to prevent duplicate setTimeout calls
@@ -181,68 +166,117 @@ export function GenerativeUIDemo() {
     }
   }, [pendingImageId]);
 
-  // Helper function to render plot tool results
-  const renderPlotToolCall = (toolName: string, color: string) => ({
-    name: toolName,
-    render: ({ args, result, status }: { args: Record<string, unknown>; result: unknown; status: string }) => {
-      // Parse result if it's a string
-      let parsedResult = result as Record<string, unknown> | null;
-      if (typeof result === "string") {
-        try {
-          parsedResult = JSON.parse(result);
-        } catch {
-          parsedResult = null;
-        }
-      }
+  // Helper to extract image_id from sub-agent text response
+  const extractImageId = (text: string | undefined | null): string | null => {
+    if (!text) return null;
+    // Look for patterns like "image_id: plot_abc123" or "plot_abc123" or "dist_abc123"
+    const patterns = [
+      /image_id[:\s]+["']?([a-zA-Z]+_[a-f0-9]+)["']?/i,
+      /\b(plot_[a-f0-9]+)\b/i,
+      /\b(dist_[a-f0-9]+)\b/i,
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return match[1];
+    }
+    return null;
+  };
 
-      // Render inline preview (smaller size)
+  // Helper to extract table_id from sub-agent text response
+  const extractTableId = (text: string | undefined | null): string | null => {
+    if (!text) return null;
+    // Look for patterns like "table_id: table_abc123" or "table_abc123"
+    const patterns = [
+      /table_id[:\s]+["']?([a-zA-Z]+_[a-f0-9]+)["']?/i,
+      /\b(table_[a-f0-9]+)\b/i,
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return match[1];
+    }
+    return null;
+  };
+
+  // Render web_research sub-agent tool calls (orchestrator level)
+  useRenderToolCall({
+    name: "web_research",
+    render: ({ args, status }) => {
       if (status === "executing") {
         return (
           <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
             <div className="flex items-center gap-2">
-              <div className={`animate-spin h-3 w-3 border-2 border-${color}-400 border-t-transparent rounded-full`} />
-              <span className="text-xs text-slate-300">Generating: {(args?.title as string) || "plot..."}</span>
+              <div className="animate-spin h-3 w-3 border-2 border-cyan-400 border-t-transparent rounded-full" />
+              <span className="text-xs text-slate-300">
+                Researching: <span className="text-cyan-400">{(args?.query as string)?.slice(0, 50) || "..."}</span>
+              </span>
+            </div>
+          </div>
+        );
+      }
+      // Complete state
+      return (
+        <div className="p-2.5 bg-cyan-500/10 rounded-lg border border-cyan-500/30 my-2">
+          <div className="flex items-center gap-1.5">
+            <span className="text-cyan-400 text-sm">&#10003;</span>
+            <span className="text-xs text-cyan-300">Research complete</span>
+          </div>
+        </div>
+      );
+    },
+  });
+
+  // Render plot_analytics sub-agent tool calls (orchestrator level)
+  useRenderToolCall({
+    name: "plot_analytics",
+    render: ({ result, status }) => {
+      if (status === "executing") {
+        return (
+          <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
+            <div className="flex items-center gap-2">
+              <div className="animate-spin h-3 w-3 border-2 border-violet-400 border-t-transparent rounded-full" />
+              <span className="text-xs text-slate-300">Creating visualization...</span>
             </div>
           </div>
         );
       }
 
-      if (status === "complete" && parsedResult?.status === "success" && parsedResult?.image_id) {
-        const imageId = parsedResult.image_id as string;
-        const title = (parsedResult.title as string) || (args?.title as string) || "Generated Plot";
+      // Sub-agent returns text content, try to extract image_id
+      const resultText = resultToString(result);
+      const imageId = extractImageId(resultText);
+
+      if (status === "complete" && imageId) {
         const displayUrl = `/api/images/${imageId}`;
 
         // Schedule state update via effect (not during render)
-        // Only schedule if this image hasn't been scheduled yet to prevent scroll jumps
         if (!scheduledImageIdsRef.current.has(imageId)) {
           scheduledImageIdsRef.current.add(imageId);
-          setTimeout(() => setPendingImageId({ id: imageId, title }), 0);
+          setTimeout(() => setPendingImageId({ id: imageId, title: "Generated Plot" }), 0);
         }
 
         return (
           <div className="p-2.5 bg-emerald-500/10 rounded-lg border border-emerald-500/30 my-2">
             <div className="flex items-center gap-1.5 mb-2">
               <span className="text-emerald-400 text-sm">&#10003;</span>
-              <span className="text-xs text-emerald-300 font-medium">{title}</span>
+              <span className="text-xs text-emerald-300 font-medium">Plot created</span>
             </div>
-            <img
+            <SafeImage
               src={displayUrl}
-              alt={title}
+              alt="Generated Plot"
               className="max-w-[280px] rounded-lg border border-slate-700/50"
             />
           </div>
         );
       }
 
-      if (parsedResult?.type === "error") {
+      // Complete but no image found - show text result
+      if (status === "complete") {
         return (
-          <div className="p-2.5 bg-rose-500/10 rounded-lg border border-rose-500/30 my-2">
-            <span className="text-xs text-rose-400">Error: {parsedResult.message as string}</span>
+          <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 my-2">
+            <span className="text-xs text-amber-300">Plot analytics completed</span>
           </div>
         );
       }
 
-      // Default: show processing state
       return (
         <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
           <span className="text-xs text-slate-400">Processing...</span>
@@ -251,53 +285,38 @@ export function GenerativeUIDemo() {
     },
   });
 
-  // Render plot_historical_data tool calls with custom UI
-  useRenderToolCall(renderPlotToolCall("plot_historical_data", "violet"));
-
-  // Render plot_distribution_comparison tool calls with custom UI
-  useRenderToolCall(renderPlotToolCall("plot_distribution_comparison", "teal"));
-
-  // Render display_table tool calls with custom UI
+  // Render display_data sub-agent tool calls (orchestrator level)
   useRenderToolCall({
-    name: "display_table",
-    render: ({ args, result, status }: { args: Record<string, unknown>; result: unknown; status: string }) => {
-      // Parse result if it's a string
-      let parsedResult = result as Record<string, unknown> | null;
-      if (typeof result === "string") {
-        try {
-          parsedResult = JSON.parse(result);
-        } catch {
-          parsedResult = null;
-        }
-      }
-
+    name: "display_data",
+    render: ({ result, status }) => {
       if (status === "executing") {
         return (
           <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
             <div className="flex items-center gap-2">
               <div className="animate-spin h-3 w-3 border-2 border-cyan-400 border-t-transparent rounded-full" />
-              <span className="text-xs text-slate-300">Generating table: {(args?.title as string) || "..."}</span>
+              <span className="text-xs text-slate-300">Creating table...</span>
             </div>
           </div>
         );
       }
 
-      if (status === "complete" && parsedResult?.status === "success" && parsedResult?.table_id) {
-        const tableId = parsedResult.table_id as string;
-        const title = (parsedResult.title as string) || (args?.title as string) || "Data Table";
+      // Sub-agent returns text content, try to extract table_id
+      const resultText = resultToString(result);
+      const tableId = extractTableId(resultText);
 
-        return <TableDisplay tableId={tableId} title={title} />;
+      if (status === "complete" && tableId) {
+        return <TableDisplay tableId={tableId} title="Data Table" />;
       }
 
-      if (parsedResult?.type === "error") {
+      // Complete but no table found
+      if (status === "complete") {
         return (
-          <div className="p-2.5 bg-rose-500/10 rounded-lg border border-rose-500/30 my-2">
-            <span className="text-xs text-rose-400">Error: {parsedResult.message as string}</span>
+          <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 my-2">
+            <span className="text-xs text-amber-300">Display data completed</span>
           </div>
         );
       }
 
-      // Default: show processing state
       return (
         <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
           <span className="text-xs text-slate-400">Processing table...</span>
@@ -307,7 +326,6 @@ export function GenerativeUIDemo() {
   });
 
   // Agent state render - returns null to avoid cluttering the chat
-  // Activity indication is handled by the isLoading state in the main UI
   useCoAgentStateRender({
     name: "my_agent",
     render: () => null,
@@ -400,7 +418,7 @@ export function GenerativeUIDemo() {
                   </svg>
                 </div>
                 <p className="text-sm text-slate-300 mb-1">No visualizations yet</p>
-                <p className="text-xs text-slate-500">Try: <span className="text-violet-400">"Plot AAPL stock price"</span></p>
+                <p className="text-xs text-slate-500">Try: <span className="text-violet-400">&quot;Plot AAPL stock price&quot;</span></p>
               </div>
             </div>
           )}
@@ -411,7 +429,8 @@ export function GenerativeUIDemo() {
       <div className="w-96 border-l border-slate-700/50 bg-slate-800/30 backdrop-blur flex flex-col h-screen">
         <CopilotChat
           className="flex-1 min-h-0"
-          instructions="You are a helpful data analysis and visualization assistant. You have access to tools for generating plots and displaying images. When asked to create visualizations, use the 'display_image' tool to show them to the user."
+          instructions="You are a helpful data analysis and visualization assistant. You have access to sub-agents for web research, plotting, and displaying tables."
+          markdownTagRenderers={safeMarkdownComponents}
         />
       </div>
     </div>
