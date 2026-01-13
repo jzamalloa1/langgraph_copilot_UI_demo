@@ -1,6 +1,6 @@
 # Deep Agent V2 - Claude Code Guide
 
-LangGraph data analysis agent with progressive disclosure skills and CopilotKit Generative UI integration.
+Multi-agent data analysis system with orchestrator pattern, progressive disclosure skills, and CopilotKit Generative UI integration.
 
 ## Quick Start
 
@@ -20,27 +20,106 @@ Frontend env in `copilot-deepagent-app/.env`:
 - `LANGGRAPH_DEPLOYMENT_URL` - LangGraph server URL
 - `LANGSMITH_API_KEY` - LangSmith API key
 
-## Architecture Overview
+## Multi-Agent Architecture
+
+**IMPORTANT**: DO NOT use `create_deep_agent` from langchain. We manually implement the orchestrator pattern using `create_agent` for full customization control.
+
+**Sub-agent Pattern**: Sub-agents are wrapped as tools using the `@tool` decorator as documented at:
+https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     LangGraph Sandbox                           │
-│  Agent runs here with isolated /tmp                             │
-│  ├── agent.py          → create_agent with tools                │
-│  ├── utils/skills.py   → load_skill, get_skills_summary         │
-│  └── utils/skill_tools.py → LangChain tools (orchestrators)     │
-│                                                                  │
-│  subprocess.run() breaks out to host machine ──────────────────┐│
-└────────────────────────────────────────────────────────────────┼┘
-                                                                  │
-┌─────────────────────────────────────────────────────────────────▼┐
-│                        Host Machine                              │
-│  ├── utils/scripts/*.py    → External scripts (matplotlib, etc) │
-│  ├── /tmp/plots/           → Generated images                   │
-│  └── copilot-deepagent-app/                                     │
-│      ├── app/api/images/   → Serves /tmp/plots/ to browser      │
-│      └── app/components/   → React components                   │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           ORCHESTRATOR (agent.py)                            │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │ create_agent with TodoListMiddleware                                    ││
+│  │ - Plans work using write_todos                                          ││
+│  │ - Delegates to sub-agents (does NOT execute tasks directly)             ││
+│  │ - Collects results and determines completion                            ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                    │                                         │
+│              ┌─────────────────────┼─────────────────────┐                  │
+│              ▼                     ▼                     ▼                  │
+│  ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐         │
+│  │   web_research    │ │  plot_analytics   │ │   display_data    │         │
+│  │   (sub-agent)     │ │   (sub-agent)     │ │   (sub-agent)     │         │
+│  ├───────────────────┤ ├───────────────────┤ ├───────────────────┤         │
+│  │ Tools:            │ │ Tools:            │ │ Tools:            │         │
+│  │ - tavily_search   │ │ - load_skill      │ │ - load_skill      │         │
+│  │                   │ │ - plot_historical │ │ - display_table   │         │
+│  │                   │ │ - plot_distrib..  │ │                   │         │
+│  └───────────────────┘ └───────────────────┘ └───────────────────┘         │
+│                                    │                                         │
+└────────────────────────────────────┼─────────────────────────────────────────┘
+                                     │ subprocess.run() breaks out to host
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              HOST MACHINE                                    │
+│  ├── utils/scripts/*.py    → External scripts (matplotlib, seaborn)        │
+│  ├── /tmp/plots/           → Generated images                              │
+│  ├── /tmp/tables/          → Generated table JSON                          │
+│  └── copilot-deepagent-app/                                                 │
+│      ├── app/api/images/   → Serves /tmp/plots/ to browser                 │
+│      ├── app/api/tables/   → Serves /tmp/tables/ to browser                │
+│      └── app/components/   → React components                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Principles
+
+1. **Orchestrator doesn't execute** - Only plans and delegates to sub-agents
+2. **Sub-agents are tools** - Wrapped with `@tool` decorator and passed to orchestrator
+3. **Progressive disclosure at sub-agent level** - Skills loaded on-demand within sub-agents
+4. **Context quarantine** - Sub-agent tool calls don't clutter orchestrator context
+5. **Defensive UI rendering** - Always guard against empty/null values before rendering images
+
+### Sub-Agent Definitions
+
+Each sub-agent is created with `create_agent` and has its own:
+- System prompt focused on its specialty
+- Tools specific to its domain
+- Middleware for limits and summarization
+
+```python
+# agents/subagents/web_research.py
+def create_web_research_agent(model: str = "openai:gpt-4o-mini"):
+    return create_agent(
+        model=model,
+        system_prompt=WEB_RESEARCH_PROMPT,
+        tools=[tavily_search],
+        middleware=[
+            ToolCallLimitMiddleware(tool_name="tavily_search", run_limit=5, exit_behavior="end"),
+            SummarizationMiddleware(...),
+        ],
+        name="web_research_agent",
+    )
+```
+
+### Converting Sub-Agents to Tools
+
+Sub-agents are wrapped as tools using the `@tool` decorator (documented pattern):
+
+```python
+# In agent.py
+from langchain_core.tools import tool
+
+# Create sub-agents
+_web_research_agent = create_web_research_agent()
+
+# Wrap as tool using @tool decorator
+# See: https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
+@tool("web_research")
+def web_research(query: str) -> str:
+    """Search the web for data. Returns structured data (dates, values, facts)."""
+    result = _web_research_agent.invoke({"messages": [{"role": "user", "content": query}]})
+    return result["messages"][-1].content
+
+# Pass to orchestrator
+agent = create_agent(
+    model="openai:gpt-4o",
+    system_prompt=ORCHESTRATOR_PROMPT,
+    tools=[web_research, plot_analytics, display_data],
+    middleware=[TodoListMiddleware(), SummarizationMiddleware(...)],
+)
 ```
 
 ## Key Patterns
@@ -59,7 +138,7 @@ CopilotKit provides the Generative UI pattern through `useRenderToolCall` - use 
 
 Skills are disclosed in two levels to minimize context usage:
 
-1. **System prompt** - Only skill names and one-line descriptions via `get_skills_summary()`
+1. **Sub-agent prompt** - Sub-agent knows which skills it can load
 2. **On-demand** - Full instructions loaded via `load_skill("skill-name")`
 3. **Scripts** - NEVER loaded into context; executed via subprocess
 
@@ -75,25 +154,25 @@ Each skill that generates output uses two files:
 The tool validates inputs, generates IDs, calls the script via `subprocess.run()`, and returns metadata.
 The script receives JSON config, does heavy work (matplotlib, etc.), saves output to `/tmp/`.
 
-### 3. Tool Call Limits
+### 3. TodoListMiddleware for Orchestrator
 
-`ToolCallLimitMiddleware` enforces limits at framework level to prevent infinite loops while allowing multi-step workflows:
+The orchestrator uses `TodoListMiddleware` to plan complex multi-step tasks:
 
 ```python
-middleware=[
-    # Allow multiple searches for multi-series data fetching
-    ToolCallLimitMiddleware(tool_name="tavily_search", run_limit=5, exit_behavior="end"),
-    # Allow loading different skills as needed
-    ToolCallLimitMiddleware(tool_name="load_skill", run_limit=3, exit_behavior="end"),
-    # Limit plotting tools to 1 per request (prevents duplicate plots)
-    ToolCallLimitMiddleware(tool_name="plot_historical_data", run_limit=1, exit_behavior="end"),
-    ToolCallLimitMiddleware(tool_name="plot_distribution_comparison", run_limit=1, exit_behavior="end"),
-    # Limit table tool to 1 per request
-    ToolCallLimitMiddleware(tool_name="display_table", run_limit=1, exit_behavior="end"),
-]
+from langchain.agents.middleware import TodoListMiddleware
+
+agent = create_agent(
+    model="openai:gpt-4o",
+    system_prompt=ORCHESTRATOR_PROMPT,
+    tools=subagent_tools,
+    middleware=[
+        TodoListMiddleware(),  # Provides write_todos tool for planning
+        SummarizationMiddleware(...),
+    ],
+)
 ```
 
-The limits are set to support common workflows like fetching data for multiple stocks (AAPL, MSFT, etc.) while preventing duplicate outputs.
+The orchestrator can use `write_todos` to plan steps, mark progress, and ensure complex tasks are completed.
 
 ### 4. Frontend Tool Result Rendering
 
@@ -116,9 +195,16 @@ Note: There's a known bug (Issue #2622) where `useRenderToolCall` may not fire d
 
 ```
 deep-agent-v2/
-├── agent.py                    # Agent configuration with create_agent
+├── agent.py                    # Orchestrator agent with sub-agents as tools
 ├── langgraph.json              # LangGraph entry point config
 ├── pyproject.toml              # Python deps (uv)
+├── agents/                     # Multi-agent system
+│   ├── __init__.py
+│   └── subagents/
+│       ├── __init__.py
+│       ├── web_research.py     # Web search sub-agent (tavily_search)
+│       ├── plot_analytics.py   # Plotting sub-agent (plot tools + skills)
+│       └── display_data.py     # Table display sub-agent (display_table + skill)
 ├── utils/
 │   ├── skills.py               # Skill loading (progressive disclosure)
 │   ├── skills.md               # Skill definitions (YAML frontmatter)
@@ -143,7 +229,93 @@ deep-agent-v2/
     └── package.json
 ```
 
-## Creating a New Skill
+## Creating a New Sub-Agent
+
+### Step 1: Create the Sub-Agent File
+
+Create `agents/subagents/your_agent.py`:
+
+```python
+"""
+Your Agent Description
+
+Responsible for [specific domain].
+"""
+
+from langchain.agents import create_agent
+from langchain.agents.middleware import ToolCallLimitMiddleware, SummarizationMiddleware
+
+from utils.your_tools import your_tool
+
+
+YOUR_AGENT_PROMPT = """You are a [specialty] specialist. Your ONLY job is to [specific task].
+
+## Your Role
+- [What this agent does]
+- [What data it returns]
+
+## Important Rules
+1. ONLY use your assigned tools
+2. Return structured results to the orchestrator
+3. After completing your task, STOP
+
+After completing your task, return your findings to the orchestrator."""
+
+
+def create_your_agent(model: str = "openai:gpt-4o-mini"):
+    return create_agent(
+        model=model,
+        system_prompt=YOUR_AGENT_PROMPT,
+        tools=[your_tool],
+        middleware=[
+            ToolCallLimitMiddleware(tool_name="your_tool", run_limit=1, exit_behavior="end"),
+            SummarizationMiddleware(model=model, trigger=("fraction", 0.75), keep=("fraction", 0.10)),
+        ],
+        name="your_agent",
+    )
+```
+
+### Step 2: Register in agents/__init__.py
+
+```python
+from agents.subagents.your_agent import create_your_agent
+
+__all__ = [
+    # ... existing exports
+    "create_your_agent",
+]
+```
+
+### Step 3: Add to Orchestrator
+
+In `agent.py`:
+
+```python
+from agents.subagents import create_your_agent
+
+_your_agent = create_your_agent()
+
+subagent_tools = [
+    # ... existing sub-agents
+    _your_agent.as_tool(
+        name="your_agent",
+        description="Description of what this agent does and returns.",
+    ),
+]
+```
+
+### Step 4: Update Orchestrator Prompt
+
+Add your new sub-agent to the `ORCHESTRATOR_PROMPT` in `agent.py`:
+
+```python
+### your_agent
+- **Purpose**: What it does
+- **Use for**: When to use it
+- **Returns**: What it returns
+```
+
+## Creating a New Skill (for existing sub-agents)
 
 ### Step 1: Create the External Script
 
@@ -156,9 +328,8 @@ import json
 
 def main():
     config = json.loads(sys.argv[1])
-    # Do actual work here (plotting, file generation, etc.)
     output_file = config['output_file']
-    # Save output to output_file
+    # Do actual work here
     print(f"Output saved to: {output_file}")
 
 if __name__ == "__main__":
@@ -171,118 +342,42 @@ Add to `utils/skill_tools.py`:
 
 ```python
 @tool(parse_docstring=True)
-def your_skill_tool(param1: str, param2: list[float]) -> dict:
-    """Brief description. Load skill 'your-skill' for usage details.
-
-    Args:
-        param1: Description
-        param2: Description
-
-    Returns:
-        Dictionary with output_id for retrieval
-    """
-    # Validate inputs
-    if not param1:
-        return {"type": "error", "message": "param1 cannot be empty"}
-
-    # Generate unique ID
-    output_id = f"output_{uuid.uuid4().hex[:8]}"
-    output_path = OUTPUT_DIR / f"{output_id}.png"
-
-    config = {"param1": param1, "param2": param2, "output_file": str(output_path)}
-
-    script_path = SCRIPTS_DIR / "your_skill.py"
-    result = subprocess.run(
-        ["python3", str(script_path), json.dumps(config)],
-        capture_output=True, text=True, timeout=30
-    )
-
-    if result.returncode != 0:
-        return {"type": "error", "message": result.stderr.strip()}
-
-    # Store metadata
-    _store_image_metadata(output_id, {"path": str(output_path), ...})
-
-    return {"type": "output", "status": "success", "output_id": output_id}
+def your_skill_tool(param1: str) -> dict:
+    """Brief description. Load skill 'your-skill' for usage details."""
+    # Validate, generate ID, call script, return metadata
 ```
 
-### Step 3: Register the Tool
+### Step 3: Add to Appropriate Sub-Agent
 
-In `agent.py`:
+In the relevant sub-agent file (e.g., `agents/subagents/plot_analytics.py`):
 
-1. Add the tool to the import line:
 ```python
-from utils.skill_tools import plot_historical_data, plot_distribution_comparison, your_skill_tool
+from utils.skill_tools import your_skill_tool
+
+# Add to tools list
+tools=[load_skill, plot_historical_data, your_skill_tool],
+
+# Add ToolCallLimitMiddleware
+ToolCallLimitMiddleware(tool_name="your_skill_tool", run_limit=1, exit_behavior="end"),
 ```
 
-2. Add to the `tools` list and add a `ToolCallLimitMiddleware` entry:
-```python
-agent = create_agent(
-    tools=[tavily_search, load_skill, plot_historical_data, plot_distribution_comparison, your_skill_tool],
-    middleware=[
-        # ... existing middleware ...
-        ToolCallLimitMiddleware(tool_name="your_skill_tool", run_limit=1, exit_behavior="end"),
-    ],
-)
-```
+### Step 4: Add Skill Documentation
 
-3. Update the `SYSTEM_PROMPT` to include workflow instructions for the new skill.
-
-### Step 4: Add Dependencies (if needed)
-
-If your script requires new packages, add them to `pyproject.toml`:
-
-```toml
-dependencies = [
-    # ... existing deps ...
-    "your-package>=1.0.0",
-]
-```
-
-Then run `uv sync` to install.
-
-### Step 5: Add Skill Documentation
-
-Add a new skill entry to `utils/skills.md`. The file supports multiple skills, each separated by YAML frontmatter blocks:
+Add to `utils/skills.md`:
 
 ```markdown
 ---
-name: existing-skill
-description: Existing skill description.
----
-
-Existing skill content...
-
----
 name: your-skill
-description: One-line description of what this skill does.
+description: One-line description.
 ---
 
 Call `your_skill_tool` with:
 - param1: description
-- param2: description
 
 Example:
 \```
-your_skill_tool(param1="value", param2=[1.0, 2.0])
+your_skill_tool(param1="value")
 \```
-```
-
-Each skill entry starts with `---`, followed by `name:` and `description:` fields, then another `---`, and finally the skill instructions. The parser automatically discovers all skills in the file.
-
-### Step 6: Frontend Rendering (if applicable)
-
-If your tool returns an `image_id`, the existing `useRenderToolCall` hook for `plot_historical_data` already handles image rendering via `/api/images/[image_id]`. For tools returning different types of visual content, add a new `useRenderToolCall` hook in the frontend:
-
-```typescript
-useRenderToolCall({
-  name: "your_skill_tool",
-  render: ({ result, status }) => {
-    if (status === "complete" && result?.output_id) {
-      return <YourCustomComponent data={result} />;
-    }
-  },
-});
 ```
 
 ## Common Issues
@@ -299,7 +394,7 @@ The fix is in `globals.css`:
 }
 .copilotKitMessages {
   flex: 1 1 0% !important;
-  min-height: 0 !important;  /* Critical for flex scrolling */
+  min-height: 0 !important;
   overflow-y: auto !important;
 }
 .copilotKitInput {
@@ -307,92 +402,100 @@ The fix is in `globals.css`:
 }
 ```
 
-### Agent keeps calling the same tool repeatedly
-
-Use `ToolCallLimitMiddleware` in `agent.py`. The `exit_behavior="end"` stops the agent after hitting the limit.
-
-### Images not displaying in UI
-
-1. Check that `utils/scripts/` script saves to `/tmp/plots/`
-2. Check that `/api/images/[filename]/route.ts` reads from `/tmp/plots/`
-3. Check that `useRenderToolCall` returns an `<img>` with the correct `image_id`
-
-### useRenderToolCall not firing
-
-This is a known bug (Issue #2622). Use `useCopilotChat().isLoading` for activity indication as a workaround.
-
 ### CopilotKit recursion limit issues
 
-CopilotKit overrides the `recursion_limit` set in `agent.py` with its own default of 25. The solution is to set it in **three places** to ensure it's applied correctly:
+Set recursion_limit in **three places**:
 
-1. **Backend** (`agent.py`): Set via `.with_config({"recursion_limit": 100})`
-2. **CopilotKit Runtime** (`app/api/copilotkit/route.ts`): Set via `assistantConfig` - **THIS IS THE KEY FIX**:
-   ```typescript
-   new LangGraphAgent({
-     deploymentUrl: process.env.LANGGRAPH_DEPLOYMENT_URL,
-     graphId: "my_agent",
-     langsmithApiKey: process.env.LANGSMITH_API_KEY,
-     assistantConfig: {
-       recursion_limit: 100,
-     },
-   })
-   ```
-3. **Frontend** (`useCoAgent` hook): Set in config for additional safety:
-   ```typescript
-   useCoAgent({
-     name: "my_agent",
-     config: {
-       recursion_limit: 100,
-     },
-   });
-   ```
+1. **Backend** (`agent.py`): `.with_config({"recursion_limit": 100})`
+2. **CopilotKit Runtime** (`route.ts`): `assistantConfig: { recursion_limit: 100 }`
+3. **Frontend** (`useCoAgent`): `config: { recursion_limit: 100 }`
 
-The `assistantConfig.recursion_limit` in the LangGraphAgent constructor is passed directly to the LangGraph SDK's `Config` type and properly overrides CopilotKit's default.
+### Images/Tables not displaying in UI
 
-See [Issue #1717](https://github.com/CopilotKit/CopilotKit/issues/1717) for background.
+1. Check script saves to `/tmp/plots/` or `/tmp/tables/`
+2. Check API routes read from correct paths
+3. Check `useRenderToolCall` returns correct component
 
-**IMPORTANT**: Do NOT suggest using `langgraph.prebuilt.create_react_agent` - it is outdated. Always use `langchain.agents.create_agent`.
+### Empty `src` attribute error in CopilotChat
 
-## Available Skills
+**Problem**: React error "An empty string was passed to the src attribute" when CopilotKit renders markdown images or tool results with empty URLs.
 
-### historical-plotter
-Creates line plots from time series data (dates/values). Uses matplotlib.
+**Solution**: Apply defensive rendering at multiple levels:
 
-```python
-plot_historical_data(dates=["2024-01-01", "2024-01-02"], values=[150.25, 155.50], title="AAPL Stock Price", ylabel="Price ($)")
+1. **Custom markdown renderer** - Override CopilotChat's default image rendering:
+
+```typescript
+// Guard against empty URLs in markdown images
+const safeMarkdownComponents = {
+  img: ({ src, alt, ...props }: { src?: string; alt?: string; [key: string]: unknown }) => {
+    if (!src || typeof src !== "string" || src.trim() === "") {
+      return null;
+    }
+    return <img src={src} alt={alt || "Image"} {...props} />;
+  },
+};
+
+<CopilotChat
+  markdownTagRenderers={safeMarkdownComponents}
+  // ... other props
+/>
 ```
 
-### distribution-comparison
-Compares distributions of one or more data groups. Uses seaborn.
+2. **Component-level guards** - Always validate URLs before rendering `<img>` tags:
 
-**Plot types:** `kde`, `histogram`, `ecdf`, `violin`, `box`, `strip`, `swarm`, `ridge`
-
-```python
-plot_distribution_comparison(
-    groups=[
-        {"name": "Treatment", "values": [23.5, 25.1, 22.8, 26.3, 24.9]},
-        {"name": "Control", "values": [20.1, 19.8, 21.2, 18.9, 20.5]}
-    ],
-    plot_type="kde",
-    title="Treatment vs Control",
-    xlabel="Measurement"
-)
+```typescript
+// In ImageDisplay.tsx or any image component
+if (!url || url.trim() === "") {
+  return null;
+}
 ```
 
-### table-display
-Displays tabular data as a formatted table in the UI. Activated when user explicitly asks for a "table" or "tabular format".
+3. **Safe result parsing** - Handle undefined/null results from tool calls:
 
-```python
-display_table(
-    columns=["Date", "Open", "High", "Low", "Close"],
-    rows=[
-        ["2024-01-08", "185.20", "186.50", "184.80", "185.90"],
-        ["2024-01-09", "186.10", "187.30", "185.50", "186.80"]
-    ],
-    title="AAPL Stock Prices",
-    caption="Last 2 trading days"
-)
+```typescript
+function resultToString(result: unknown): string {
+  if (result === null || result === undefined) return "";
+  if (typeof result === "string") return result;
+  try { return JSON.stringify(result); } catch { return ""; }
+}
 ```
+
+### Sub-agent tool rendering in orchestrator architecture
+
+**Problem**: When using orchestrator pattern, the frontend sees orchestrator-level tools (`web_research`, `plot_analytics`, `display_data`) NOT inner tools (`plot_historical_data`, `tavily_search`).
+
+**Solution**:
+1. Only register `useRenderToolCall` hooks for orchestrator-level tools
+2. Extract IDs from sub-agent text responses using regex patterns:
+
+```typescript
+const extractImageId = (text: string | null | undefined): string | null => {
+  if (!text) return null;
+  const patterns = [
+    /image_id[:\s]+["']?([a-zA-Z]+_[a-f0-9]+)["']?/i,
+    /\b(plot_[a-f0-9]+)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+};
+```
+
+## Available Sub-Agents
+
+### web_research
+Searches the web for data using Tavily. Returns structured data.
+
+### plot_analytics
+Creates visualizations using matplotlib/seaborn. Skills:
+- `historical-plotter`: Time series line plots
+- `distribution-comparison`: KDE, histogram, violin, box plots
+
+### display_data
+Displays tabular data. Skills:
+- `table-display`: Formatted tables
 
 ## Dependencies
 

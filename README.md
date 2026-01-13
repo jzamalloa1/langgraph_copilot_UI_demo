@@ -1,272 +1,119 @@
 # Deep Agent V2
 
-A LangGraph-based agent with progressive disclosure skills and Generative UI integration.
+A multi-agent LangGraph system with orchestrator pattern, progressive disclosure skills, and Generative UI integration.
+
+## Architecture Overview
+
+This project uses a **multi-agent orchestrator pattern** where a main orchestrator agent coordinates specialized sub-agents:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           ORCHESTRATOR (agent.py)                            │
+│  - Plans work using TodoListMiddleware                                       │
+│  - Delegates to sub-agents (does NOT execute tasks directly)                 │
+│  - Collects results and determines completion                                │
+│                                                                              │
+│              ┌─────────────────────┬─────────────────────┐                  │
+│              ▼                     ▼                     ▼                  │
+│  ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐         │
+│  │   web_research    │ │  plot_analytics   │ │   display_data    │         │
+│  │   (sub-agent)     │ │   (sub-agent)     │ │   (sub-agent)     │         │
+│  ├───────────────────┤ ├───────────────────┤ ├───────────────────┤         │
+│  │ • tavily_search   │ │ • plot_historical │ │ • display_table   │         │
+│  │                   │ │ • plot_distrib..  │ │                   │         │
+│  └───────────────────┘ └───────────────────┘ └───────────────────┘         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼ subprocess.run()
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              HOST MACHINE                                    │
+│  • utils/scripts/*.py → External scripts (matplotlib, seaborn)              │
+│  • /tmp/plots/, /tmp/tables/ → Generated outputs                            │
+│  • copilot-deepagent-app/ → Next.js frontend with CopilotKit                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Key Solutions
 
-This project solved two challenging integration problems:
+### 1. Multi-Agent Orchestration
 
-### 1. Agent Tool Looping Prevention
+**Pattern**: Orchestrator delegates to specialized sub-agents, each with focused responsibilities.
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import TodoListMiddleware
+from langchain_core.tools import tool
+
+# Create sub-agents
+_web_research_agent = create_web_research_agent()
+
+# Wrap sub-agents as tools using @tool decorator
+# See: https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
+@tool("web_research")
+def web_research(query: str) -> str:
+    """Search the web for data. Returns structured data."""
+    result = _web_research_agent.invoke({"messages": [{"role": "user", "content": query}]})
+    return result["messages"][-1].content
+
+# Orchestrator uses sub-agents as tools
+agent = create_agent(
+    model="openai:gpt-4o",
+    system_prompt=ORCHESTRATOR_PROMPT,
+    tools=[web_research, plot_analytics, display_data],
+    middleware=[TodoListMiddleware()],
+)
+```
+
+### 2. Agent Tool Looping Prevention
 
 **Problem**: Agent repeatedly calls the same tools despite prompt instructions to stop.
 
-**Solution**: `ToolCallLimitMiddleware` from `langchain.agents.middleware` enforces hard limits at the framework level.
+**Solution**: `ToolCallLimitMiddleware` enforces hard limits at the framework level within each sub-agent.
 
-```python
-from langchain.agents.middleware import ToolCallLimitMiddleware
-
-middleware=[
-    ToolCallLimitMiddleware(tool_name="tavily_search", run_limit=1, exit_behavior="end"),
-    ToolCallLimitMiddleware(tool_name="plot_historical_data", run_limit=1, exit_behavior="end"),
-]
-```
-
-### 2. Displaying Backend Tool Results in UI
-
-**Problem**: Frontend tools registered with `useFrontendTool` are NOT automatically available to LangGraph agents using `create_agent`.
+### 3. Displaying Backend Tool Results in UI
 
 **Solution**: Use `useRenderToolCall` hook to intercept backend tool results and render them:
 
 ```typescript
 useRenderToolCall({
-  name: "plot_historical_data",
+  name: "plot_analytics",  // Orchestrator-level tool name
   render: ({ result, status }) => {
-    if (status === "complete" && result?.image_id) {
-      return <img src={`/api/images/${result.image_id}`} />;
+    const resultText = resultToString(result);
+    const imageId = extractImageId(resultText);
+    if (status === "complete" && imageId) {
+      return <img src={`/api/images/${imageId}`} />;
     }
   },
 });
 ```
 
-See [LANGGRAPH_UI_INTEGRATION.md](copilot-deepagent-app/LANGGRAPH_UI_INTEGRATION.md) for detailed documentation on what works, what doesn't, and why.
+### 4. Defensive UI Rendering
 
-## Architecture
+**Problem**: Empty `src` attributes cause React errors when CopilotKit renders markdown or tool results.
 
-### Execution Environment
+**Solution**: Guard against empty URLs at multiple levels:
 
-The system operates across two distinct environments:
+```typescript
+// Custom markdown renderer for CopilotChat
+const safeMarkdownComponents = {
+  img: ({ src, alt }) => {
+    if (!src || src.trim() === "") return null;
+    return <img src={src} alt={alt || "Image"} />;
+  },
+};
 
+<CopilotChat markdownTagRenderers={safeMarkdownComponents} />
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     LangGraph Sandbox                           │
-│  ┌─────────────┐    ┌──────────────┐    ┌──────────────────┐   │
-│  │   Agent     │───▶│ skill_tools  │───▶│ subprocess.run() │   │
-│  │  (create_   │    │   .py        │    │                  │   │
-│  │   agent)    │    │              │    │ Breaks out to    │   │
-│  └─────────────┘    └──────────────┘    │ host machine     │   │
-│                                          └────────┬─────────┘   │
-│  - Agent logic runs here                          │             │
-│  - In-memory metadata (_session_images)           │             │
-│  - Sandbox /tmp ≠ Host /tmp                       │             │
-└───────────────────────────────────────────────────┼─────────────┘
-                                                    │
-                                                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        Host Machine                              │
-│  ┌──────────────────┐         ┌─────────────────────────────┐   │
-│  │ scripts/         │         │ /tmp/plots/                 │   │
-│  │ plot_historical_ │────────▶│  plot_abc123.png            │   │
-│  │ data.py          │ writes  │  plot_def456.png            │   │
-│  └──────────────────┘         └──────────────┬──────────────┘   │
-│                                               │                  │
-│  ┌──────────────────────────────────────────┐│                  │
-│  │ Next.js Frontend (copilot-deepagent-app) ││                  │
-│  │                                          ││                  │
-│  │  /api/images/[filename] ◀────────────────┘│                  │
-│  │       │                    reads          │                  │
-│  │       ▼                                   │                  │
-│  │  ImageDisplay component                   │                  │
-│  └──────────────────────────────────────────┘                   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Key Points
-
-1. **LangGraph Sandbox Isolation**
-   - `langgraph dev` runs the agent in an isolated environment
-   - The sandbox has its own `/tmp` directory, separate from the host
-   - Tools like `ls` (if enabled) would see the sandbox's filesystem, not the host's
-
-2. **Subprocess Breaks Out to Host**
-   - `subprocess.run(["python3", script_path, ...])` executes on the **host machine**
-   - Scripts in `utils/scripts/` run with host Python and host filesystem access
-   - This is how images get saved to the host's `/tmp/plots`
-
-3. **Frontend Reads from Host**
-   - Next.js runs on the host machine
-   - `/api/images/[filename]` route reads directly from host's `/tmp/plots`
-   - Frontend can display images because it shares the host filesystem
-
-### Data Flow for Plotting
-
-```
-1. Agent receives user request
-   └─▶ "Plot AAPL stock price"
-
-2. Agent calls tools (in sandbox):
-   ├─▶ tavily_search() → gets data
-   ├─▶ load_skill("historical-plotter") → gets instructions
-   └─▶ plot_historical_data(dates, values, title)
-       │
-       └─▶ subprocess.run() breaks out to host
-           └─▶ scripts/plot_historical_data.py
-               └─▶ Saves to /tmp/plots/plot_abc123.png (HOST)
-
-3. Tool returns to agent (minimal response):
-   └─▶ {image_id: "plot_abc123", title: "...", status: "success"}
-       (No base64 data - keeps agent context small)
-
-4. Frontend intercepts tool result via useRenderToolCall:
-   └─▶ Renders <img src="/api/images/plot_abc123" />
-       └─▶ API route reads /tmp/plots/plot_abc123.png
-           └─▶ Returns image binary to browser
-
-5. Agent replies to user with confirmation
-```
-
-### Session Storage
-
-- **In-memory metadata**: `_session_images` dict in `skill_tools.py`
-  - Stores image metadata (id, title, path, description)
-  - Persists within the `langgraph dev` process lifetime
-  - Lost when the server restarts
-
-- **On-disk images**: `/tmp/plots/` on host
-  - Actual PNG files persist across restarts
-  - Frontend can always serve them if they exist
-
-- **Agent tools for session data**:
-  - `list_stored_images()` - Lists images from current session (in-memory)
-  - `get_stored_image(image_id)` - Gets metadata and verifies file exists
 
 ## Progressive Disclosure
 
 Skills use a two-level disclosure pattern:
 
-1. **System prompt** shows only skill names and descriptions
+1. **Sub-agent prompt** - Sub-agent knows which skills it can load
 2. **Full instructions** loaded on-demand via `load_skill()`
-3. **Script code** is NEVER loaded into context - executed externally via subprocess
+3. **Script code** is NEVER loaded into context - executed via subprocess
 
 This keeps the agent's context window small while maintaining full functionality.
-
-## Skill Tool Architecture: Two-File Pattern
-
-Each skill that generates output (like plots) uses a **two-file pattern**: a LangChain Tool (orchestrator) and an External Script (executor).
-
-### Why Two Files?
-
-| File | Role | Runs In | Context Impact |
-|------|------|---------|----------------|
-| `skill_tools.py::plot_historical_data()` | **LangChain Tool** - orchestrates workflow, validates inputs, manages metadata | LangGraph sandbox | Only docstring visible to LLM |
-| `scripts/plot_historical_data.py` | **External Script** - does actual work (matplotlib plotting) | Host machine (via subprocess) | NEVER loaded into context |
-
-### Detailed Flow: `plot_historical_data`
-
-```
-User: "Plot AAPL stock price"
-           │
-           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  AGENT (agent.py)                                                │
-│  Tools: [tavily_search, load_skill, plot_historical_data]       │
-│                                                                  │
-│  1. tavily_search("AAPL stock price") → gets dates/values       │
-│  2. load_skill("historical-plotter") → gets formatting guide    │
-│  3. plot_historical_data(dates, values, title, ylabel)          │
-│           │                                                      │
-└───────────┼──────────────────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  skill_tools.py :: plot_historical_data() [LangChain Tool]      │
-│                                                                  │
-│  • Validates inputs (dates/values not empty, lengths match)     │
-│  • Generates unique image_id: "plot_abc123"                     │
-│  • Creates output path: /tmp/plots/plot_abc123.png              │
-│  • Builds config JSON with dates, values, title, output_file    │
-│  • Calls subprocess.run():                                       │
-│           │                                                      │
-│    subprocess.run([                                              │
-│      "python3",                                                  │
-│      "utils/scripts/plot_historical_data.py",  ◄── SCRIPT       │
-│      '{"dates": [...], "values": [...], ...}'                   │
-│    ])                                                            │
-│           │                                                      │
-└───────────┼──────────────────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  scripts/plot_historical_data.py [External Script]              │
-│                                                                  │
-│  • Parses JSON config from sys.argv[1]                          │
-│  • Parses date strings into datetime objects                    │
-│  • Creates matplotlib figure (12x6, line plot with markers)     │
-│  • Formats axes, grid, title                                    │
-│  • Saves PNG to /tmp/plots/plot_abc123.png                      │
-│  • Prints: "Plot saved to: /tmp/plots/plot_abc123.png"          │
-│           │                                                      │
-└───────────┼──────────────────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  skill_tools.py :: plot_historical_data() [Continues]           │
-│                                                                  │
-│  • Verifies file was created at /tmp/plots/plot_abc123.png     │
-│  • Stores metadata in _session_images dict                      │
-│  • Returns: {                                                    │
-│      "type": "image",                                           │
-│      "status": "success",                                       │
-│      "image_id": "plot_abc123",                                 │
-│      "title": "AAPL Stock Price",                               │
-│      "data_points": 10                                          │
-│    }                                                             │
-└─────────────────────────────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Frontend (useRenderToolCall or /api/images/[filename])         │
-│                                                                  │
-│  • Receives image_id from tool result                           │
-│  • Renders: <img src="/api/images/plot_abc123" />               │
-│  • API route reads /tmp/plots/plot_abc123.png and serves it    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Design Benefits
-
-1. **Context Efficiency**: The matplotlib script (~100 lines) is NEVER loaded into the agent's context. Only the tool's docstring is visible to the LLM.
-
-2. **Sandbox Escape**: The subprocess breaks out of LangGraph's isolated sandbox to the host filesystem, where `/tmp/plots/` is accessible by the frontend.
-
-3. **Separation of Concerns**: The tool handles orchestration (validation, ID generation, metadata storage) while the script handles the actual work (matplotlib, date parsing, formatting).
-
-4. **Reusability**: The same script can be called with different parameters, or even from other tools, without duplicating visualization logic.
-
-### Creating New Skills
-
-When creating a new skill that generates output:
-
-1. **Create the LangChain Tool** in `skill_tools.py`:
-   - Validate inputs
-   - Generate unique output ID
-   - Build config JSON
-   - Call external script via `subprocess.run()`
-   - Store metadata and return result
-
-2. **Create the External Script** in `utils/scripts/`:
-   - Accept JSON config via `sys.argv[1]`
-   - Do the actual work (plotting, file generation, etc.)
-   - Save output to `/tmp/` directory
-   - Print confirmation message
-
-3. **Register the tool** in `agent.py`:
-   - Import from `skill_tools.py`
-   - Add to the `tools` list
-   - Add `ToolCallLimitMiddleware` if needed
-
-4. **Add skill documentation** to `utils/skills.md`:
-   - YAML frontmatter with name and description
-   - Full instructions for the agent
 
 ## Running the System
 
@@ -282,45 +129,35 @@ cd deep-agent-v2/copilot-deepagent-app
 npm run dev
 ```
 
-## Available Skills
+## Available Sub-Agents
 
-The agent supports multiple skills through progressive disclosure:
-
-| Skill | Tool | Description |
-|-------|------|-------------|
-| `historical-plotter` | `plot_historical_data` | Line plots from time series data |
-| `distribution-comparison` | `plot_distribution_comparison` | Distribution plots (KDE, histogram, violin, box, etc.) |
-| `table-display` | `display_table` | Formatted tabular data display |
-
-Skills are triggered by explicit user requests:
-- **Plot**: "chart", "graph", "plot", "visualize"
-- **Table**: "table", "tabular format", "spreadsheet"
-- **Text** (default): "get", "pull", "fetch", "find"
+| Sub-Agent | Purpose | Tools/Skills |
+|-----------|---------|--------------|
+| `web_research` | Web search and data retrieval | `tavily_search` |
+| `plot_analytics` | Data visualization | `historical-plotter`, `distribution-comparison` |
+| `display_data` | Tabular data display | `table-display` |
 
 ## File Structure
 
 ```
 deep-agent-v2/
-├── agent.py                 # Agent configuration
+├── agent.py                    # Orchestrator agent
+├── agents/                     # Multi-agent system
+│   └── subagents/
+│       ├── web_research.py     # Web search sub-agent
+│       ├── plot_analytics.py   # Plotting sub-agent
+│       └── display_data.py     # Table display sub-agent
 ├── utils/
-│   ├── skills.py           # Skill loading (progressive disclosure)
-│   ├── skills.md           # Skill instructions (YAML frontmatter)
-│   ├── skill_tools.py      # Tool implementations
-│   └── scripts/
-│       ├── plot_historical_data.py       # Time series plots
-│       ├── plot_distribution_comparison.py  # Distribution plots
-│       └── render_table.py               # Table data generation
-├── copilot-deepagent-app/   # Next.js frontend
+│   ├── skills.py               # Skill loading
+│   ├── skills.md               # Skill definitions
+│   ├── skill_tools.py          # Tool implementations
+│   ├── tools.py                # tavily_search
+│   └── scripts/                # External scripts (matplotlib, etc.)
+├── copilot-deepagent-app/      # Next.js frontend
 │   └── app/
-│       ├── api/
-│       │   ├── copilotkit/  # CopilotKit runtime
-│       │   ├── images/      # Image serving API
-│       │   └── tables/      # Table data API
-│       └── components/
-│           ├── GenerativeUIDemo.tsx  # Main UI with useRenderToolCall hooks
-│           ├── ImageDisplay.tsx      # Image gallery component
-│           └── TableDisplay.tsx      # Table rendering component
-└── langgraph.json          # LangGraph configuration
+│       ├── api/                # API routes for images/tables
+│       └── components/         # React components
+└── langgraph.json              # LangGraph configuration
 ```
 
 For detailed development guidance, see [CLAUDE.md](CLAUDE.md).
