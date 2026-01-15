@@ -15,6 +15,7 @@ npm run dev
 Required environment variables in `.env`:
 - `TAVILY_API_KEY` - For web search
 - `OPENAI_API_KEY` - For LLM
+- `LLAMA_CLOUD_API_KEY` - For document parsing (LlamaParse) and indexing
 
 Frontend env in `copilot-deepagent-app/.env`:
 - `LANGGRAPH_DEPLOYMENT_URL` - LangGraph server URL
@@ -39,15 +40,15 @@ https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
 │                                    │                                         │
 │              ┌─────────────────────┼─────────────────────┐                  │
 │              ▼                     ▼                     ▼                  │
-│  ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐         │
-│  │   web_research    │ │  plot_analytics   │ │   display_data    │         │
-│  │   (sub-agent)     │ │   (sub-agent)     │ │   (sub-agent)     │         │
-│  ├───────────────────┤ ├───────────────────┤ ├───────────────────┤         │
-│  │ Tools:            │ │ Tools:            │ │ Tools:            │         │
-│  │ - tavily_search   │ │ - load_skill      │ │ - load_skill      │         │
-│  │                   │ │ - plot_historical │ │ - display_table   │         │
-│  │                   │ │ - plot_distrib..  │ │                   │         │
-│  └───────────────────┘ └───────────────────┘ └───────────────────┘         │
+│  ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
+│  │   web_research    │ │  plot_analytics   │ │   display_data    │ │ document_analysis │
+│  │   (sub-agent)     │ │   (sub-agent)     │ │   (sub-agent)     │ │   (sub-agent)     │
+│  ├───────────────────┤ ├───────────────────┤ ├───────────────────┤ ├───────────────────┤
+│  │ Tools:            │ │ Tools:            │ │ Tools:            │ │ Tools:            │
+│  │ - tavily_search   │ │ - load_skill      │ │ - load_skill      │ │ - list_uploaded   │
+│  │                   │ │ - plot_historical │ │ - display_table   │ │ - parse_document  │
+│  │                   │ │ - plot_distrib..  │ │                   │ │ - query_document  │
+│  └───────────────────┘ └───────────────────┘ └───────────────────┘ └───────────────────┘
 │                                    │                                         │
 └────────────────────────────────────┼─────────────────────────────────────────┘
                                      │ subprocess.run() breaks out to host
@@ -57,9 +58,11 @@ https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
 │  ├── utils/scripts/*.py    → External scripts (matplotlib, seaborn)        │
 │  ├── /tmp/plots/           → Generated images                              │
 │  ├── /tmp/tables/          → Generated table JSON                          │
+│  ├── /tmp/uploads/         → Uploaded documents for analysis               │
 │  └── copilot-deepagent-app/                                                 │
 │      ├── app/api/images/   → Serves /tmp/plots/ to browser                 │
 │      ├── app/api/tables/   → Serves /tmp/tables/ to browser                │
+│      ├── app/api/upload/   → Handles document uploads to /tmp/uploads/     │
 │      └── app/components/   → React components                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -204,12 +207,14 @@ deep-agent-v2/
 │       ├── __init__.py
 │       ├── web_research.py     # Web search sub-agent (tavily_search)
 │       ├── plot_analytics.py   # Plotting sub-agent (plot tools + skills)
-│       └── display_data.py     # Table display sub-agent (display_table + skill)
+│       ├── display_data.py     # Table display sub-agent (display_table + skill)
+│       └── document_analysis.py # Document analysis sub-agent (LlamaCloud)
 ├── utils/
 │   ├── skills.py               # Skill loading (progressive disclosure)
 │   ├── skills.md               # Skill definitions (YAML frontmatter)
 │   ├── skill_tools.py          # LangChain tool implementations
 │   ├── tools.py                # tavily_search and other tools
+│   ├── document_tools.py       # Document parsing/querying tools (LlamaCloud)
 │   └── scripts/
 │       ├── plot_historical_data.py       # External matplotlib script
 │       ├── plot_distribution_comparison.py  # Seaborn distribution plots
@@ -223,7 +228,8 @@ deep-agent-v2/
     │   ├── components/
     │   │   ├── GenerativeUIDemo.tsx # Main UI with useRenderToolCall hooks
     │   │   ├── ImageDisplay.tsx     # Image gallery component
-    │   │   └── TableDisplay.tsx     # Table rendering component
+    │   │   ├── TableDisplay.tsx     # Table rendering component
+    │   │   └── DocumentUpload.tsx   # Document upload drag-and-drop component
     │   ├── page.tsx
     │   └── globals.css         # Contains CopilotKit scrolling fix
     └── package.json
@@ -497,8 +503,27 @@ Creates visualizations using matplotlib/seaborn. Skills:
 Displays tabular data. Skills:
 - `table-display`: Formatted tables
 
+### document_analysis
+Parses and queries uploaded documents using LlamaCloud. Tools:
+- `list_uploaded_files`: Discovers files in `/tmp/uploads/`
+- `parse_document`: Parses documents with LlamaParse and indexes them in LlamaCloud
+- `query_document`: Semantic search over indexed documents
+
+**Workflow**:
+1. Frontend uploads file via `/api/upload` → saved to `/tmp/uploads/{file_id}.{ext}`
+2. User asks about "the document" → orchestrator calls `document_analysis`
+3. Sub-agent calls `list_uploaded_files` to discover available files
+4. Sub-agent calls `parse_document` with `file_id` → LlamaParse + LlamaCloudIndex
+5. Sub-agent calls `query_document` to retrieve relevant passages
+6. Returns synthesized answer to orchestrator
+
+**Key Integration Points**:
+- `useCopilotReadable` provides document context to the agent
+- `useFrontendTool("get_uploaded_document")` allows frontend-side file info access
+- `useRenderToolCall("document_analysis")` renders progress/completion UI
+
 ## Dependencies
 
 - Python 3.13+, managed with `uv`
-- Key packages: `langgraph`, `langchain`, `copilotkit`, `matplotlib`, `seaborn`, `pandas`, `tavily`
+- Key packages: `langgraph`, `langchain`, `copilotkit`, `matplotlib`, `seaborn`, `pandas`, `tavily`, `llama-cloud`, `llama-cloud-services`
 - Frontend: Next.js 15, React 19, CopilotKit

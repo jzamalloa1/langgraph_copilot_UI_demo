@@ -9,16 +9,19 @@ Sub-agents:
 - web-research: Web search and data retrieval (tavily_search)
 - plot-analytics: Data visualization and plotting (plot_historical_data, plot_distribution_comparison)
 - display-data: Tabular data display (display_table)
+- document-analysis: Document parsing and Q&A using LlamaCloud (parse_document, query_document)
 """
 
 from agents.subagents import (
     create_web_research_agent,
     create_plot_analytics_agent,
     create_display_data_agent,
+    create_document_analysis_agent,
 )
 
 __all__ = [
     "create_web_research_agent",
     "create_plot_analytics_agent",
     "create_display_data_agent",
+    "create_document_analysis_agent",
 ]

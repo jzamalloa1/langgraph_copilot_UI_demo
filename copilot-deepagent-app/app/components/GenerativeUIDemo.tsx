@@ -1,15 +1,23 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useCoAgent, useCoAgentStateRender, useFrontendTool, useRenderToolCall, useCopilotChat } from "@copilotkit/react-core";
+import { useCoAgent, useCoAgentStateRender, useFrontendTool, useRenderToolCall, useCopilotChat, useCopilotReadable } from "@copilotkit/react-core";
 import { CopilotChat } from "@copilotkit/react-ui";
 import { ImageDisplay } from "./ImageDisplay";
 import { TableDisplay } from "./TableDisplay";
+import { DocumentUpload } from "./DocumentUpload";
 
 interface ImageData {
   url: string;
   title?: string;
   timestamp: number;
+}
+
+interface UploadedDocument {
+  file_id: string;
+  filename: string;
+  size: number;
+  extension: string;
 }
 
 // Safe image component that only renders when src is valid
@@ -56,17 +64,44 @@ function resultToString(result: unknown): string {
 export function GenerativeUIDemo() {
   const [images, setImages] = useState<ImageData[]>([]);
   const [agentStatus, setAgentStatus] = useState<string>("Ready");
+  const [uploadedDoc, setUploadedDoc] = useState<UploadedDocument | null>(null);
 
   // Get loading state from CopilotKit
   const { isLoading } = useCopilotChat();
 
   // Configure the agent with recursion_limit to prevent infinite loops
   // Note: recursion_limit must be at the top level of config, not inside configurable
+  // Also pass uploaded document info through initialState so the agent can access it
   useCoAgent({
     name: "my_agent",
+    initialState: {
+      uploaded_document: uploadedDoc
+        ? {
+            file_id: uploadedDoc.file_id,
+            filename: uploadedDoc.filename,
+            extension: uploadedDoc.extension,
+            size: uploadedDoc.size,
+          }
+        : null,
+    },
     config: {
       recursion_limit: 100,
     },
+  });
+
+  // Make uploaded document info available as readable context for the agent
+  // This ensures the agent always knows about uploaded documents
+  useCopilotReadable({
+    description: "Currently uploaded document information",
+    value: uploadedDoc
+      ? `UPLOADED DOCUMENT AVAILABLE:
+- Filename: ${uploadedDoc.filename}
+- File ID: ${uploadedDoc.file_id}
+- Extension: ${uploadedDoc.extension}
+- Size: ${uploadedDoc.size} bytes
+
+IMPORTANT: When the user asks about "the document", "this file", wants to "summarize it", or asks any question about the uploaded document, you MUST call the document_analysis sub-agent with this task: "Parse and analyze document with file_id='${uploadedDoc.file_id}' and filename='${uploadedDoc.filename}'. User question: [their question]"`
+      : "No document has been uploaded yet.",
   });
 
   // Update agent status based on loading state
@@ -144,6 +179,33 @@ export function GenerativeUIDemo() {
         success: true,
         message: "All images cleared",
       };
+    },
+  });
+
+  // Register a tool to get uploaded document info
+  // This allows the agent to retrieve the file_id when user asks about "the document"
+  useFrontendTool({
+    name: "get_uploaded_document",
+    description: "Get information about the currently uploaded document. Call this when the user asks about a document they uploaded, wants to summarize it, or asks questions about it. Returns file_id and filename needed for document_analysis.",
+    parameters: [],
+    handler: async () => {
+      if (uploadedDoc) {
+        return {
+          success: true,
+          has_document: true,
+          file_id: uploadedDoc.file_id,
+          filename: uploadedDoc.filename,
+          size: uploadedDoc.size,
+          extension: uploadedDoc.extension,
+          message: `Document "${uploadedDoc.filename}" is uploaded. Use file_id "${uploadedDoc.file_id}" with document_analysis to answer questions about it.`,
+        };
+      } else {
+        return {
+          success: true,
+          has_document: false,
+          message: "No document has been uploaded yet. Ask the user to upload a document first.",
+        };
+      }
     },
   });
 
@@ -325,6 +387,49 @@ export function GenerativeUIDemo() {
     },
   });
 
+  // Render document_analysis sub-agent tool calls (orchestrator level)
+  useRenderToolCall({
+    name: "document_analysis",
+    render: ({ result, status }) => {
+      if (status === "executing") {
+        return (
+          <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
+            <div className="flex items-center gap-2">
+              <div className="animate-spin h-3 w-3 border-2 border-amber-400 border-t-transparent rounded-full" />
+              <span className="text-xs text-slate-300">
+                Analyzing document...
+              </span>
+            </div>
+          </div>
+        );
+      }
+
+      // Check if the result indicates document indexing or query results
+      const resultText = resultToString(result);
+      const isIndexed = resultText.includes("indexed") || resultText.includes("parsed");
+      const hasResults = resultText.includes("results") || resultText.includes("found");
+
+      if (status === "complete") {
+        return (
+          <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 my-2">
+            <div className="flex items-center gap-1.5">
+              <span className="text-amber-400 text-sm">&#10003;</span>
+              <span className="text-xs text-amber-300">
+                {isIndexed ? "Document indexed" : hasResults ? "Document queried" : "Document analysis complete"}
+              </span>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="p-2.5 bg-slate-800/50 rounded-lg border border-slate-700/50 my-2">
+          <span className="text-xs text-slate-400">Processing document...</span>
+        </div>
+      );
+    },
+  });
+
   // Agent state render - returns null to avoid cluttering the chat
   useCoAgentStateRender({
     name: "my_agent",
@@ -427,9 +532,41 @@ export function GenerativeUIDemo() {
 
       {/* Chat Panel */}
       <div className="w-96 border-l border-slate-700/50 bg-slate-800/30 backdrop-blur flex flex-col h-screen">
+        {/* Document Upload Section */}
+        <div className="p-3 border-b border-slate-700/50">
+          <div className="text-xs font-medium text-slate-400 mb-2">Upload Document</div>
+          <DocumentUpload
+            onUploadComplete={(file) => {
+              setUploadedDoc(file);
+            }}
+            disabled={isLoading}
+          />
+          {uploadedDoc && (
+            <div className="mt-2 text-xs text-slate-400">
+              Ask questions about: <span className="text-violet-400">{uploadedDoc.filename}</span>
+            </div>
+          )}
+        </div>
         <CopilotChat
           className="flex-1 min-h-0"
-          instructions="You are a helpful data analysis and visualization assistant. You have access to sub-agents for web research, plotting, and displaying tables."
+          instructions={`You are a helpful data analysis and visualization assistant. You have access to sub-agents for web research, plotting, displaying tables, and document analysis.${
+            uploadedDoc
+              ? `
+
+CRITICAL DOCUMENT CONTEXT:
+The user has uploaded a document that is ready for analysis:
+- Filename: "${uploadedDoc.filename}"
+- File ID: "${uploadedDoc.file_id}"
+
+When the user asks ANYTHING about "the document", "this file", "it", wants to "summarize", "analyze", or asks ANY question that could relate to the uploaded document, you MUST:
+1. Call the document_analysis sub-agent with EXACTLY this task string:
+   "Analyze the document with file_id='${uploadedDoc.file_id}' and filename='${uploadedDoc.filename}'. User question: [insert user's question here]"
+2. The sub-agent will handle parsing and querying the document.
+3. Return the results to the user.
+
+DO NOT say "no document uploaded" - a document IS uploaded with file_id="${uploadedDoc.file_id}".`
+              : ""
+          }`}
           markdownTagRenderers={safeMarkdownComponents}
         />
       </div>

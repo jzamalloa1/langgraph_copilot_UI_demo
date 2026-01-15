@@ -19,6 +19,7 @@ from agents.subagents import (
     create_web_research_agent,
     create_plot_analytics_agent,
     create_display_data_agent,
+    create_document_analysis_agent,
 )
 
 
@@ -54,6 +55,12 @@ You have access to these specialized sub-agents (call them as tools):
 - **Requires**: Columns and rows of data
 - **Returns**: table_id for the generated table
 
+### document_analysis
+- **Purpose**: Parse uploaded documents and answer questions about them
+- **Use for**: When user mentions "the document", "this file", "summarize it", or asks about uploaded documents
+- **How it works**: The sub-agent will automatically discover uploaded files, parse them, and answer questions
+- **Returns**: Answers based on document content
+
 ## Workflow Patterns
 
 ### Pattern 1: Data Retrieval Only
@@ -82,6 +89,13 @@ User asks for complex analysis:
 2. Execute each step by calling appropriate sub-agents
 3. Mark todos complete as you go
 4. Provide final summary when all done
+
+### Pattern 5: Document Analysis
+User asks about "the document", "this file", wants to "summarize it", or asks questions about uploaded files:
+1. Call document_analysis with the user's question (e.g., "Summarize the uploaded document")
+2. The sub-agent will automatically discover uploaded files, parse them, and answer the question
+3. Return the answer to the user
+4. STOP
 
 ## Critical Rules
 
@@ -116,13 +130,18 @@ User: "Show me GDP growth as a table"
 
 User: "What is the current price of Bitcoin?"
 → Call web_research("Bitcoin current price")
-→ Return: Present the answer as text"""
+→ Return: Present the answer as text
+
+User: "Summarize the document" or "What are the key findings?"
+→ Call document_analysis("Summarize the uploaded document and provide key findings")
+→ Return: Present the answer based on document content"""
 
 
 # Create sub-agents (these are full agents with their own tools and middleware)
 _web_research_agent = create_web_research_agent()
 _plot_analytics_agent = create_plot_analytics_agent()
 _display_data_agent = create_display_data_agent()
+_document_analysis_agent = create_document_analysis_agent()
 
 
 # Wrap sub-agents as tools using @tool decorator (documented pattern)
@@ -148,8 +167,15 @@ def display_data(task: str) -> str:
     return result["messages"][-1].content
 
 
+@tool("document_analysis")
+def document_analysis(task: str) -> str:
+    """Parse uploaded documents and answer questions about them. Pass the file_id, filename, and the user's question. The sub-agent will parse the document using LlamaCloud and query it for relevant information. Returns answers based on document content."""
+    result = _document_analysis_agent.invoke({"messages": [{"role": "user", "content": task}]})
+    return result["messages"][-1].content
+
+
 # Collect sub-agent tools
-subagent_tools = [web_research, plot_analytics, display_data]
+subagent_tools = [web_research, plot_analytics, display_data, document_analysis]
 
 
 # Main orchestrator agent - this is what LangGraph runs

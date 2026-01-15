@@ -11,9 +11,11 @@ Each sub-agent:
 from agents.subagents.web_research import create_web_research_agent
 from agents.subagents.plot_analytics import create_plot_analytics_agent
 from agents.subagents.display_data import create_display_data_agent
+from agents.subagents.document_analysis import create_document_analysis_agent
 
 __all__ = [
     "create_web_research_agent",
     "create_plot_analytics_agent",
     "create_display_data_agent",
+    "create_document_analysis_agent",
 ]
